@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
-import { getTokens, getAlerts, getStats, getHealth, pingBackend } from "./api.js";
+import { getTokens, getAlerts, getStats, getHealth, pingBackend, analyzeToken } from "./api.js";
 
 function getScoreColor(s){return s>=75?"#16a34a":s>=50?"#d97706":s>=25?"#ea580c":"#dc2626";}
 function getScoreBg(s){return s>=75?"#dcfce7":s>=50?"#fef3c7":s>=25?"#ffedd5":"#fee2e2";}
@@ -9,41 +9,31 @@ function getScoreLabel(s){return s>=75?"Safe":s>=50?"Caution":s>=25?"Risky":"Dan
 function fmt(n){if(!n)return"0";return n>=1e6?(n/1e6).toFixed(2)+"M":n>=1e3?(n/1e3).toFixed(1)+"K":n.toString();}
 function fmtP(p){if(!p)return"$0";return p<.0001?p.toExponential(2):p<1?p.toFixed(6):p.toFixed(4);}
 
-function ScoreBadge({score,type}){
-  const c=type==="safety"?getScoreColor(score):getProbaColor(score);
-  const bg=type==="safety"?getScoreBg(score):getProbaBg(score);
-  const lb=type==="safety"?getScoreLabel(score):score+"%";
-  return(<div style={{display:"flex",alignItems:"center",gap:5}}><span style={{fontSize:13,fontWeight:700,color:c}}>{score}</span><span style={{fontSize:9,fontWeight:600,color:c,background:bg,padding:"2px 7px",borderRadius:12}}>{lb}</span></div>);
-}
-
-function ReturnBadge({rp}){
-  if(!rp)return <span style={{fontSize:11,color:"#94a3b8"}}>--</span>;
-  const c=getProbaColor(rp.probability);const bg=getProbaBg(rp.probability);
-  return(<div style={{display:"flex",alignItems:"center",gap:4}}><span style={{fontSize:12,fontWeight:700,color:c}}>{rp.probability}%</span><span style={{fontSize:9,fontWeight:600,color:c,background:bg,padding:"2px 6px",borderRadius:10}}>+{rp.expectedGain}% ({rp.horizon})</span></div>);
-}
-
-function MiniChart({data,width=110,height=28,bad}){
-  if(!data||data.length<2)return <div style={{width,height,background:"#f1f5f9",borderRadius:6}}/>;
-  const f=data.filter(v=>v>0);if(f.length<2)return null;
-  const mn=Math.min(...f),mx=Math.max(...f),r=mx-mn||1;
-  const pts=f.map((v,i)=>`${(i/(f.length-1))*width},${height-((v-mn)/r)*(height-4)-2}`).join(" ");
-  const col=bad?"#dc2626":"#16a34a";
-  return(<svg width={width} height={height} style={{display:"block"}}><defs><linearGradient id={"cg"+(bad?1:0)} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={col} stopOpacity="0.15"/><stop offset="100%" stopColor={col} stopOpacity="0"/></linearGradient></defs><polygon points={`0,${height} ${pts} ${width},${height}`} fill={"url(#cg"+(bad?1:0)+")"}/><polyline points={pts} fill="none" stroke={col} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" opacity="0.8"/></svg>);
-}
-
-function FlagBadge({label,type}){
-  const s={danger:{bg:"#fee2e2",color:"#dc2626",border:"#fecaca"},warn:{bg:"#ffedd5",color:"#ea580c",border:"#fed7aa"},ok:{bg:"#dcfce7",color:"#16a34a",border:"#bbf7d0"},trend:{bg:"#fef3c7",color:"#b45309",border:"#fde68a"},pump:{bg:"#ede9fe",color:"#7c3aed",border:"#c4b5fd"},whale:{bg:"#dbeafe",color:"#1d4ed8",border:"#93c5fd"}}[type||"danger"];
-  return <span style={{fontSize:10,fontWeight:600,padding:"2px 8px",borderRadius:12,background:s.bg,color:s.color,border:"1px solid "+s.border}}>{label}</span>;
-}
-
+function ScoreBadge({score,type}){const c=type==="safety"?getScoreColor(score):getProbaColor(score);const bg=type==="safety"?getScoreBg(score):getProbaBg(score);const lb=type==="safety"?getScoreLabel(score):score+"%";return(<div style={{display:"flex",alignItems:"center",gap:5}}><span style={{fontSize:13,fontWeight:700,color:c}}>{score}</span><span style={{fontSize:9,fontWeight:600,color:c,background:bg,padding:"2px 7px",borderRadius:12}}>{lb}</span></div>);}
+function ReturnBadge({rp}){if(!rp)return <span style={{fontSize:11,color:"#94a3b8"}}>--</span>;const c=getProbaColor(rp.probability);const bg=getProbaBg(rp.probability);return(<div style={{display:"flex",alignItems:"center",gap:4}}><span style={{fontSize:12,fontWeight:700,color:c}}>{rp.probability}%</span><span style={{fontSize:9,fontWeight:600,color:c,background:bg,padding:"2px 6px",borderRadius:10}}>+{rp.expectedGain}% ({rp.horizon})</span></div>);}
+function MiniChart({data,width=110,height=28,bad}){if(!data||data.length<2)return <div style={{width,height,background:"#f1f5f9",borderRadius:6}}/>;const f=data.filter(v=>v>0);if(f.length<2)return null;const mn=Math.min(...f),mx=Math.max(...f),r=mx-mn||1;const pts=f.map((v,i)=>`${(i/(f.length-1))*width},${height-((v-mn)/r)*(height-4)-2}`).join(" ");const col=bad?"#dc2626":"#16a34a";return(<svg width={width} height={height} style={{display:"block"}}><defs><linearGradient id={"cg"+(bad?1:0)} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={col} stopOpacity="0.15"/><stop offset="100%" stopColor={col} stopOpacity="0"/></linearGradient></defs><polygon points={`0,${height} ${pts} ${width},${height}`} fill={"url(#cg"+(bad?1:0)+")"}/><polyline points={pts} fill="none" stroke={col} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" opacity="0.8"/></svg>);}
+function FlagBadge({label,type}){const s={danger:{bg:"#fee2e2",color:"#dc2626",border:"#fecaca"},warn:{bg:"#ffedd5",color:"#ea580c",border:"#fed7aa"},ok:{bg:"#dcfce7",color:"#16a34a",border:"#bbf7d0"},trend:{bg:"#fef3c7",color:"#b45309",border:"#fde68a"},pump:{bg:"#ede9fe",color:"#7c3aed",border:"#c4b5fd"},whale:{bg:"#dbeafe",color:"#1d4ed8",border:"#93c5fd"}}[type||"danger"];return <span style={{fontSize:10,fontWeight:600,padding:"2px 8px",borderRadius:12,background:s.bg,color:s.color,border:"1px solid "+s.border}}>{label}</span>;}
 function Badge({ok,label}){return(<span style={{display:"inline-block",padding:"2px 7px",borderRadius:8,fontSize:10,fontWeight:600,background:ok?"#dcfce7":"#fee2e2",color:ok?"#16a34a":"#dc2626"}}>{ok?"✓":"✗"} {label}</span>);}
 function StatCard({label,value,color}){return(<div style={{background:"#fff",borderRadius:12,padding:"16px 20px",border:"1px solid #e2e8f0"}}><div style={{fontSize:12,color:"#64748b",marginBottom:4}}>{label}</div><div style={{fontSize:20,fontWeight:700,color:color||"#1e293b"}}>{value}</div></div>);}
-function AIVerdictBadge({verdict}){if(!verdict)return null;const m={"ACHETER":{bg:"#dcfce7",color:"#16a34a",border:"#bbf7d0",e:"🟢"},"SURVEILLER":{bg:"#fef3c7",color:"#b45309",border:"#fde68a",e:"🟡"},"EVITER":{bg:"#fee2e2",color:"#dc2626",border:"#fecaca",e:"🔴"}};const s=m[verdict]||m["EVITER"];return <span style={{fontSize:12,fontWeight:700,padding:"4px 12px",borderRadius:10,background:s.bg,color:s.color,border:"1px solid "+s.border}}>{s.e} {verdict}</span>;}
-
 function SectionTitle({children}){return <div style={{fontSize:11,fontWeight:600,color:"#64748b",textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>{children}</div>;}
 function InfoBox({bg,border,children}){return <div style={{background:bg||"#f8fafc",borderRadius:12,padding:14,marginBottom:16,border:"1px solid "+(border||"#e2e8f0")}}>{children}</div>;}
 
-function TokenDetail({token,onClose}){
+function ConfidenceBar({value,max=10}){const pct=(value/max)*100;const col=pct>=70?"#16a34a":pct>=40?"#d97706":"#dc2626";return(<div style={{display:"flex",alignItems:"center",gap:8}}><div style={{flex:1,height:6,borderRadius:3,background:"#e2e8f0"}}><div style={{width:pct+"%",height:"100%",borderRadius:3,background:col}}/></div><span style={{fontSize:12,fontWeight:700,color:col}}>{value}/{max}</span></div>);}
+
+function TokenDetail({token:initialToken,onClose,onRefresh}){
+  const[token,setToken]=useState(initialToken);
+  const[analyzing,setAnalyzing]=useState(false);
+  const[analyzeError,setAnalyzeError]=useState(null);
+
+  const handleAnalyze=async()=>{
+    setAnalyzing(true);setAnalyzeError(null);
+    try{
+      const result=await analyzeToken(token.address);
+      if(result.analysis){setToken(prev=>({...prev,ai_analysis:result.analysis,ai_analysis_at:Date.now()}));}
+    }catch(err){setAnalyzeError(err.message);}
+    setAnalyzing(false);
+  };
+
   const br=token.buys/(Math.max(token.buys+token.sells,1))*100;
   const checks=token.safety_checks||{};
   const rp=token.return_proba;
@@ -55,9 +45,9 @@ function TokenDetail({token,onClose}){
 
   return(
     <div style={{position:"fixed",inset:0,zIndex:1000,background:"rgba(15,23,42,0.5)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={onClose}>
-      <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:16,width:"100%",maxWidth:600,padding:28,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 25px 50px rgba(0,0,0,0.15)"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:16,width:"100%",maxWidth:620,padding:28,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 25px 50px rgba(0,0,0,0.15)"}}>
         {/* Header */}
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:20}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
           <div><div style={{fontSize:11,color:"#94a3b8",marginBottom:4,wordBreak:"break-all"}}>{token.address}</div><div style={{fontSize:20,fontWeight:700,color:"#1e293b"}}>{token.name} <span style={{color:"#94a3b8",fontWeight:400,fontSize:14}}>/ {token.symbol}</span></div></div>
           <div style={{display:"flex",gap:12}}>
             <div style={{textAlign:"center"}}><div style={{fontSize:9,color:"#94a3b8",textTransform:"uppercase",letterSpacing:1,marginBottom:2}}>Safety</div><ScoreBadge score={token.safety} type="safety"/></div>
@@ -65,52 +55,86 @@ function TokenDetail({token,onClose}){
           </div>
         </div>
 
-        {/* Early Pump banner */}
-        {ep>=50&&(<InfoBox bg="#f5f3ff" border="#c4b5fd"><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:20}}>🚀</span><div><div style={{fontSize:13,fontWeight:700,color:"#7c3aed"}}>EARLY PUMP SIGNAL: {ep}/100</div><div style={{fontSize:11,color:"#6d28d9"}}>{(token.early_pump_signals||[]).join(" | ")}</div></div></div></InfoBox>)}
-
-        {/* Smart Money banner */}
-        {sm&&sm.score>=30&&(<InfoBox bg="#eff6ff" border="#93c5fd"><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:20}}>🐋</span><div><div style={{fontSize:13,fontWeight:700,color:"#1d4ed8"}}>SMART MONEY: {sm.score}/100</div><div style={{fontSize:11,color:"#2563eb"}}>{(sm.signals||[]).join(" | ")}</div>{sm.knownBuyers&&sm.knownBuyers.length>0&&<div style={{marginTop:6,display:"flex",gap:4,flexWrap:"wrap"}}>{sm.knownBuyers.map((b,i)=><span key={i} style={{fontSize:9,padding:"2px 6px",borderRadius:6,background:"#dbeafe",color:"#1e40af",fontWeight:600}}>{b.wallet} ({b.label})</span>)}</div>}</div></div></InfoBox>)}
-
-        {/* Trend banner */}
-        {trend&&(<InfoBox bg="#fffbeb" border="#fde68a"><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:20}}>🔥</span><div><div style={{fontSize:13,fontWeight:700,color:"#b45309"}}>TREND: {trend.term}</div><div style={{fontSize:11,color:"#92400e"}}>Score {trend.score}/100 | {trend.freshness}min{trend.competition?" | "+trend.competition+" concurrents":""}</div></div></div></InfoBox>)}
+        {/* Banners */}
+        {ep>=50&&<InfoBox bg="#f5f3ff" border="#c4b5fd"><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:20}}>🚀</span><div><div style={{fontSize:13,fontWeight:700,color:"#7c3aed"}}>EARLY PUMP: {ep}/100</div><div style={{fontSize:11,color:"#6d28d9"}}>{(token.early_pump_signals||[]).join(" | ")}</div></div></div></InfoBox>}
+        {sm&&sm.score>=30&&<InfoBox bg="#eff6ff" border="#93c5fd"><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:20}}>🐋</span><div><div style={{fontSize:13,fontWeight:700,color:"#1d4ed8"}}>SMART MONEY: {sm.score}/100</div><div style={{fontSize:11,color:"#2563eb"}}>{(sm.signals||[]).join(" | ")}</div>{sm.knownBuyers&&sm.knownBuyers.length>0&&<div style={{marginTop:4,display:"flex",gap:4,flexWrap:"wrap"}}>{sm.knownBuyers.map((b,i)=><span key={i} style={{fontSize:9,padding:"2px 6px",borderRadius:6,background:"#dbeafe",color:"#1e40af",fontWeight:600}}>{b.wallet} ({b.label})</span>)}</div>}</div></div></InfoBox>}
+        {trend&&<InfoBox bg="#fffbeb" border="#fde68a"><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:20}}>🔥</span><div><div style={{fontSize:13,fontWeight:700,color:"#b45309"}}>TREND: {trend.term}</div><div style={{fontSize:11,color:"#92400e"}}>Score {trend.score}/100 | {trend.freshness}min{trend.competition?" | "+trend.competition+" concurrents":""}</div></div></div></InfoBox>}
 
         {/* Links */}
         <div style={{display:"flex",gap:6,marginBottom:16,flexWrap:"wrap"}}>
           {[{l:"DEX Screener",u:token.url||"https://dexscreener.com/solana/"+token.pair_address},{l:"Birdeye",u:"https://birdeye.so/token/"+token.address+"?chain=solana"},{l:"Solscan",u:"https://solscan.io/token/"+token.address},{l:"rugcheck",u:"https://rugcheck.xyz/tokens/"+token.address}].map((lk,i)=>(<a key={i} href={lk.u} target="_blank" rel="noopener noreferrer" style={{padding:"5px 12px",borderRadius:8,fontSize:11,fontWeight:500,background:"#f8fafc",color:"#475569",border:"1px solid #e2e8f0",textDecoration:"none"}}>{lk.l} ↗</a>))}
         </div>
 
-        {/* AI Analysis */}
-        {ai&&(<InfoBox bg="#f0f9ff" border="#bae6fd"><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}><SectionTitle>Analyse IA (Groq)</SectionTitle><AIVerdictBadge verdict={ai.verdict}/></div><div style={{fontSize:13,color:"#1e293b",lineHeight:1.5,marginBottom:10}}>{ai.resume}</div>{ai.raisons&&<div style={{display:"flex",flexDirection:"column",gap:4}}>{ai.raisons.map((r,i)=>(<div key={i} style={{display:"flex",gap:6}}><span style={{color:"#0369a1",fontWeight:700,fontSize:12}}>→</span><span style={{fontSize:12,color:"#334155"}}>{r}</span></div>))}</div>}</InfoBox>)}
-        {!ai&&token.safety>=60&&token.potential>=40&&<InfoBox><div style={{textAlign:"center",fontSize:12,color:"#94a3b8"}}>Analyse IA en cours...</div></InfoBox>}
+        {/* AI ANALYSIS SECTION */}
+        <div style={{background:ai?"#f0f9ff":"#f8fafc",borderRadius:12,padding:16,marginBottom:16,border:"1px solid "+(ai?"#bae6fd":"#e2e8f0")}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:ai?12:0}}>
+            <SectionTitle>Analyse IA</SectionTitle>
+            <button onClick={handleAnalyze} disabled={analyzing} style={{padding:"6px 16px",borderRadius:8,border:"1px solid #2563eb",background:analyzing?"#e2e8f0":"#2563eb",color:analyzing?"#64748b":"#fff",cursor:analyzing?"wait":"pointer",fontSize:12,fontWeight:600}}>
+              {analyzing?"Analyse en cours...":ai?"Re-analyser":"Analyser ce token"}
+            </button>
+          </div>
+          {analyzeError&&<div style={{padding:"8px 12px",borderRadius:8,background:"#fee2e2",color:"#dc2626",fontSize:12,marginBottom:10}}>Erreur: {analyzeError}</div>}
 
-        {/* Social section */}
-        {social&&(<InfoBox><SectionTitle>Profil social</SectionTitle><div style={{display:"flex",gap:6,flexWrap:"wrap"}}>{social.hasTwitter&&<FlagBadge label="Twitter" type="ok"/>}{social.hasTelegram&&<FlagBadge label="Telegram" type="ok"/>}{social.hasDiscord&&<FlagBadge label="Discord" type="ok"/>}{social.hasWebsite&&<FlagBadge label="Website" type="ok"/>}{social.score===0&&<FlagBadge label="Aucun social" type="danger"/>}</div><div style={{marginTop:6,fontSize:12,color:"#64748b"}}>Score social: <span style={{fontWeight:700,color:social.score>=50?"#16a34a":social.score>=20?"#d97706":"#dc2626"}}>{social.score}/100</span></div></InfoBox>)}
+          {ai&&(<>
+            {/* Verdict + Confiance */}
+            <div style={{display:"flex",gap:12,alignItems:"center",marginBottom:12}}>
+              <span style={{fontSize:14,fontWeight:700,padding:"6px 16px",borderRadius:10,background:ai.verdict==="ACHETER"?"#dcfce7":ai.verdict==="SURVEILLER"?"#fef3c7":"#fee2e2",color:ai.verdict==="ACHETER"?"#16a34a":ai.verdict==="SURVEILLER"?"#b45309":"#dc2626",border:"1px solid "+(ai.verdict==="ACHETER"?"#bbf7d0":ai.verdict==="SURVEILLER"?"#fde68a":"#fecaca")}}>{ai.verdict==="ACHETER"?"🟢":ai.verdict==="SURVEILLER"?"🟡":"🔴"} {ai.verdict}</span>
+              {ai.confiance&&<div style={{flex:1}}><div style={{fontSize:9,color:"#64748b",marginBottom:2}}>CONFIANCE</div><ConfidenceBar value={ai.confiance} max={10}/></div>}
+              {ai.score_confirmation&&<div style={{textAlign:"center"}}><div style={{fontSize:9,color:"#64748b",marginBottom:2}}>SCORE IA</div><span style={{fontSize:18,fontWeight:800,color:getProbaColor(ai.score_confirmation)}}>{ai.score_confirmation}</span><span style={{fontSize:10,color:"#94a3b8"}}>/100</span></div>}
+            </div>
+
+            {/* Resume */}
+            <div style={{fontSize:13,color:"#1e293b",lineHeight:1.6,marginBottom:12,padding:"10px 14px",background:"#fff",borderRadius:8,border:"1px solid #e2e8f0"}}>{ai.resume}</div>
+
+            {/* Forces / Faiblesses */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+              <div><div style={{fontSize:10,fontWeight:600,color:"#16a34a",marginBottom:6}}>FORCES</div>{(ai.forces||[]).map((f,i)=><div key={i} style={{fontSize:11,color:"#166534",padding:"4px 0",display:"flex",gap:4}}><span>✓</span><span>{f}</span></div>)}</div>
+              <div><div style={{fontSize:10,fontWeight:600,color:"#dc2626",marginBottom:6}}>FAIBLESSES</div>{(ai.faiblesses||[]).map((f,i)=><div key={i} style={{fontSize:11,color:"#991b1b",padding:"4px 0",display:"flex",gap:4}}><span>✗</span><span>{f}</span></div>)}</div>
+            </div>
+
+            {/* Risque principal */}
+            {ai.risque_principal&&<div style={{padding:"8px 12px",borderRadius:8,background:"#fef2f2",border:"1px solid #fecaca",marginBottom:12}}><div style={{fontSize:10,fontWeight:600,color:"#dc2626",marginBottom:2}}>RISQUE PRINCIPAL</div><div style={{fontSize:12,color:"#991b1b"}}>{ai.risque_principal}</div></div>}
+
+            {/* Trading plan */}
+            {(ai.entry_zone||ai.stop_loss||ai.take_profit)&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:8}}>
+              {ai.entry_zone&&<div style={{background:"#f0fdf4",borderRadius:8,padding:"8px 10px",border:"1px solid #bbf7d0"}}><div style={{fontSize:9,color:"#16a34a",fontWeight:600}}>ENTREE</div><div style={{fontSize:11,color:"#166534",fontWeight:600,marginTop:2}}>{ai.entry_zone}</div></div>}
+              {ai.stop_loss&&<div style={{background:"#fef2f2",borderRadius:8,padding:"8px 10px",border:"1px solid #fecaca"}}><div style={{fontSize:9,color:"#dc2626",fontWeight:600}}>STOP LOSS</div><div style={{fontSize:11,color:"#991b1b",fontWeight:600,marginTop:2}}>{ai.stop_loss}</div></div>}
+              {ai.take_profit&&<div style={{background:"#dbeafe",borderRadius:8,padding:"8px 10px",border:"1px solid #93c5fd"}}><div style={{fontSize:9,color:"#2563eb",fontWeight:600}}>TAKE PROFIT</div><div style={{fontSize:11,color:"#1e40af",fontWeight:600,marginTop:2}}>{ai.take_profit}</div></div>}
+            </div>}
+            {ai.horizon&&<div style={{fontSize:11,color:"#64748b",textAlign:"center"}}>Horizon: <span style={{fontWeight:600,color:"#1e293b"}}>{ai.horizon}</span></div>}
+          </>)}
+
+          {!ai&&!analyzing&&<div style={{textAlign:"center",padding:12,color:"#94a3b8",fontSize:12}}>Clique "Analyser ce token" pour une analyse IA complete avec confirmation d'achat.</div>}
+        </div>
+
+        {/* Social */}
+        {social&&<InfoBox><SectionTitle>Profil social</SectionTitle><div style={{display:"flex",gap:6,flexWrap:"wrap"}}>{social.hasTwitter&&<FlagBadge label="Twitter" type="ok"/>}{social.hasTelegram&&<FlagBadge label="Telegram" type="ok"/>}{social.hasDiscord&&<FlagBadge label="Discord" type="ok"/>}{social.hasWebsite&&<FlagBadge label="Website" type="ok"/>}{social.score===0&&<FlagBadge label="Aucun social" type="danger"/>}</div><div style={{marginTop:6,fontSize:12,color:"#64748b"}}>Score: <span style={{fontWeight:700,color:social.score>=50?"#16a34a":social.score>=20?"#d97706":"#dc2626"}}>{social.score}/100</span></div></InfoBox>}
 
         {/* Price chart */}
-        <InfoBox><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><SectionTitle>Price action</SectionTitle>{token.staircase_detected?<FlagBadge label={"Staircase "+token.staircase_confidence+"%"} type="danger"/>:<FlagBadge label="Organic" type="ok"/>}</div><MiniChart data={token.price_history} width={520} height={55} bad={token.staircase_detected}/></InfoBox>
+        <InfoBox><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><SectionTitle>Price action</SectionTitle>{token.staircase_detected?<FlagBadge label={"Staircase "+token.staircase_confidence+"%"} type="danger"/>:<FlagBadge label="Organic" type="ok"/>}</div><MiniChart data={token.price_history} width={540} height={55} bad={token.staircase_detected}/></InfoBox>
 
-        {/* Metrics grid */}
+        {/* Metrics */}
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:16}}>
           {[{l:"Price",v:"$"+fmtP(token.price)},{l:"MCap",v:"$"+fmt(token.market_cap)},{l:"Vol 24H",v:"$"+fmt(token.volume_24h)},{l:"Liquidity",v:"$"+fmt(token.liquidity)},{l:"Holders",v:(token.holders||"?").toLocaleString()},{l:"Age",v:token.age_hours+"h"}].map((m,i)=>(<div key={i} style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:10,padding:"10px 12px"}}><div style={{fontSize:9,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",marginBottom:2}}>{m.l}</div><div style={{fontSize:14,color:"#1e293b",fontWeight:700}}>{m.v}</div></div>))}
         </div>
 
-        {/* Return proba detail */}
-        {rp&&(<InfoBox><SectionTitle>Estimation de retour</SectionTitle><div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}><div style={{fontSize:28,fontWeight:800,color:getProbaColor(rp.probability)}}>{rp.probability}%</div><div><div style={{fontSize:14,fontWeight:600,color:"#1e293b"}}>de chance de +{rp.expectedGain}%</div><div style={{fontSize:12,color:"#64748b"}}>Horizon: {rp.horizon}</div></div></div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>{rp.factors&&Object.entries(rp.factors).map(([k,v])=>(<div key={k} style={{display:"flex",justifyContent:"space-between",padding:"5px 10px",borderRadius:6,background:"#fff",border:"1px solid #e2e8f0"}}><span style={{fontSize:10,color:"#64748b"}}>{k.replace(/_/g," ")}</span><span style={{fontSize:10,fontWeight:700,color:"#1e293b"}}>{v}</span></div>))}</div></InfoBox>)}
+        {/* Return proba */}
+        {rp&&<InfoBox><SectionTitle>Estimation de retour</SectionTitle><div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}><div style={{fontSize:28,fontWeight:800,color:getProbaColor(rp.probability)}}>{rp.probability}%</div><div><div style={{fontSize:14,fontWeight:600,color:"#1e293b"}}>de chance de +{rp.expectedGain}%</div><div style={{fontSize:12,color:"#64748b"}}>Horizon: {rp.horizon}</div></div></div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>{rp.factors&&Object.entries(rp.factors).map(([k,v])=>(<div key={k} style={{display:"flex",justifyContent:"space-between",padding:"5px 10px",borderRadius:6,background:"#fff",border:"1px solid #e2e8f0"}}><span style={{fontSize:10,color:"#64748b"}}>{k.replace(/_/g," ")}</span><span style={{fontSize:10,fontWeight:700,color:"#1e293b"}}>{v}</span></div>))}</div></InfoBox>}
 
         {/* Honeypot */}
-        {token.honeypot_detected&&(<div style={{background:"#fef2f2",border:"2px solid #fecaca",borderRadius:12,padding:"14px 18px",marginBottom:16,display:"flex",alignItems:"center",gap:12}}><span style={{fontSize:24}}>⚠️</span><div><div style={{fontSize:14,fontWeight:700,color:"#991b1b"}}>HONEYPOT DETECTED</div><div style={{fontSize:12,color:"#dc2626",marginTop:2}}>Do NOT buy this token.</div></div></div>)}
+        {token.honeypot_detected&&<div style={{background:"#fef2f2",border:"2px solid #fecaca",borderRadius:12,padding:"14px 18px",marginBottom:16,display:"flex",alignItems:"center",gap:12}}><span style={{fontSize:24}}>⚠️</span><div><div style={{fontSize:14,fontWeight:700,color:"#991b1b"}}>HONEYPOT</div><div style={{fontSize:12,color:"#dc2626",marginTop:2}}>Impossible a vendre.</div></div></div>}
 
         {/* Jupiter */}
-        {(token.buy_slippage!=null||token.sell_tax!=null)&&(<InfoBox><SectionTitle>Swap simulation (Jupiter)</SectionTitle><div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
-          {token.buy_slippage!=null&&<div style={{background:token.buy_slippage<5?"#f0fdf4":"#fef2f2",borderRadius:8,padding:"8px 12px",border:"1px solid "+(token.buy_slippage<5?"#bbf7d0":"#fecaca")}}><div style={{fontSize:9,color:"#64748b",marginBottom:2}}>BUY SLIP</div><div style={{fontSize:15,fontWeight:700,color:token.buy_slippage<5?"#16a34a":token.buy_slippage<10?"#d97706":"#dc2626"}}>{token.buy_slippage.toFixed(1)}%</div></div>}
-          {token.sell_slippage!=null&&<div style={{background:token.sell_slippage<8?"#f0fdf4":"#fef2f2",borderRadius:8,padding:"8px 12px",border:"1px solid "+(token.sell_slippage<8?"#bbf7d0":"#fecaca")}}><div style={{fontSize:9,color:"#64748b",marginBottom:2}}>SELL SLIP</div><div style={{fontSize:15,fontWeight:700,color:token.sell_slippage<8?"#16a34a":token.sell_slippage<15?"#d97706":"#dc2626"}}>{token.sell_slippage.toFixed(1)}%</div></div>}
-          {token.sell_tax!=null&&<div style={{background:token.sell_tax<5?"#f0fdf4":"#fef2f2",borderRadius:8,padding:"8px 12px",border:"1px solid "+(token.sell_tax<5?"#bbf7d0":"#fecaca")}}><div style={{fontSize:9,color:"#64748b",marginBottom:2}}>SELL TAX</div><div style={{fontSize:15,fontWeight:700,color:token.sell_tax<5?"#16a34a":token.sell_tax<15?"#d97706":"#dc2626"}}>{token.sell_tax.toFixed(1)}%</div></div>}
-        </div></InfoBox>)}
+        {(token.buy_slippage!=null||token.sell_tax!=null)&&<InfoBox><SectionTitle>Jupiter simulation</SectionTitle><div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+          {token.buy_slippage!=null&&<div style={{background:token.buy_slippage<5?"#f0fdf4":"#fef2f2",borderRadius:8,padding:"8px 12px",border:"1px solid "+(token.buy_slippage<5?"#bbf7d0":"#fecaca")}}><div style={{fontSize:9,color:"#64748b"}}>BUY SLIP</div><div style={{fontSize:15,fontWeight:700,color:token.buy_slippage<5?"#16a34a":"#dc2626"}}>{token.buy_slippage.toFixed(1)}%</div></div>}
+          {token.sell_slippage!=null&&<div style={{background:token.sell_slippage<8?"#f0fdf4":"#fef2f2",borderRadius:8,padding:"8px 12px",border:"1px solid "+(token.sell_slippage<8?"#bbf7d0":"#fecaca")}}><div style={{fontSize:9,color:"#64748b"}}>SELL SLIP</div><div style={{fontSize:15,fontWeight:700,color:token.sell_slippage<8?"#16a34a":"#dc2626"}}>{token.sell_slippage.toFixed(1)}%</div></div>}
+          {token.sell_tax!=null&&<div style={{background:token.sell_tax<8?"#f0fdf4":"#fef2f2",borderRadius:8,padding:"8px 12px",border:"1px solid "+(token.sell_tax<8?"#bbf7d0":"#fecaca")}}><div style={{fontSize:9,color:"#64748b"}}>SELL TAX</div><div style={{fontSize:15,fontWeight:700,color:token.sell_tax<8?"#16a34a":"#dc2626"}}>{token.sell_tax.toFixed(1)}%</div></div>}
+        </div></InfoBox>}
 
-        {/* Buy/sell bar */}
+        {/* Buy/sell */}
         <div style={{marginBottom:16}}><div style={{display:"flex",height:8,borderRadius:4,overflow:"hidden",background:"#fee2e2"}}><div style={{width:br+"%",background:"#16a34a",borderRadius:"4px 0 0 4px"}}/></div><div style={{display:"flex",justifyContent:"space-between",marginTop:4,fontSize:11}}><span style={{color:"#16a34a",fontWeight:600}}>Buy {token.buys} ({br.toFixed(0)}%)</span><span style={{color:"#dc2626",fontWeight:600}}>Sell {token.sells} ({(100-br).toFixed(0)}%)</span></div></div>
 
-        {/* Security audit */}
+        {/* Security */}
         <div style={{marginBottom:16}}><SectionTitle>Security audit</SectionTitle><div style={{display:"flex",flexDirection:"column",gap:4}}>{Object.entries(checks).map(([k,c],i)=>(<div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 12px",borderRadius:8,background:c.pass?"#f0fdf4":"#fef2f2",border:"1px solid "+(c.pass?"#bbf7d0":"#fecaca")}}><span style={{fontSize:11,color:c.pass?"#166534":"#991b1b",fontWeight:500}}>{k.replace(/_/g," ").toUpperCase()}</span><Badge ok={c.pass} label={String(c.value)}/></div>))}</div></div>
         <button onClick={onClose} style={{width:"100%",padding:11,borderRadius:10,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#64748b",cursor:"pointer",fontSize:13,fontWeight:600}}>Close</button>
       </div>
@@ -118,11 +142,7 @@ function TokenDetail({token,onClose}){
   );
 }
 
-function AlertsPanel({alerts,onClose}){
-  const tc={safe:"#16a34a",danger:"#dc2626",potential:"#2563eb",graduation:"#ea580c",narrative:"#7c3aed"};
-  const tbg={safe:"#dcfce7",danger:"#fee2e2",potential:"#dbeafe",graduation:"#ffedd5",narrative:"#ede9fe"};
-  return(<div style={{position:"fixed",inset:0,zIndex:1000,background:"rgba(15,23,42,0.5)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={onClose}><div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:16,width:"100%",maxWidth:560,padding:24,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 25px 50px rgba(0,0,0,0.15)"}}><div style={{fontSize:18,fontWeight:700,color:"#1e293b",marginBottom:16}}>Alert Log</div>{alerts.length===0&&<div style={{textAlign:"center",padding:40,color:"#94a3b8",fontSize:13}}>No alerts yet.</div>}<div style={{display:"flex",flexDirection:"column",gap:6}}>{alerts.map((a,i)=>(<div key={a.id||i} style={{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",borderRadius:10,background:"#f8fafc",border:"1px solid #e2e8f0"}}><div style={{width:7,height:7,borderRadius:"50%",background:tc[a.type]||"#94a3b8",flexShrink:0}}/><span style={{fontSize:11,color:"#94a3b8",flexShrink:0,width:38}}>{a.time}</span><span style={{fontSize:9,fontWeight:600,padding:"2px 7px",borderRadius:10,background:tbg[a.type]||"#f3f4f6",color:tc[a.type]||"#64748b",flexShrink:0}}>{(a.type||"").toUpperCase()}</span>{a.symbol&&<span style={{fontSize:12,fontWeight:700,color:"#1e293b",flexShrink:0,width:50}}>{a.symbol}</span>}<span style={{fontSize:11,color:"#64748b",flex:1}}>{a.message}</span></div>))}</div><button onClick={onClose} style={{width:"100%",padding:11,borderRadius:10,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#64748b",cursor:"pointer",fontSize:13,fontWeight:600,marginTop:14}}>Close</button></div></div>);
-}
+function AlertsPanel({alerts,onClose}){const tc={safe:"#16a34a",danger:"#dc2626",potential:"#2563eb",graduation:"#ea580c",narrative:"#7c3aed"};const tbg={safe:"#dcfce7",danger:"#fee2e2",potential:"#dbeafe",graduation:"#ffedd5",narrative:"#ede9fe"};return(<div style={{position:"fixed",inset:0,zIndex:1000,background:"rgba(15,23,42,0.5)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={onClose}><div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:16,width:"100%",maxWidth:560,padding:24,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 25px 50px rgba(0,0,0,0.15)"}}><div style={{fontSize:18,fontWeight:700,color:"#1e293b",marginBottom:16}}>Alert Log</div>{alerts.length===0&&<div style={{textAlign:"center",padding:40,color:"#94a3b8",fontSize:13}}>No alerts yet.</div>}<div style={{display:"flex",flexDirection:"column",gap:6}}>{alerts.map((a,i)=>(<div key={a.id||i} style={{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",borderRadius:10,background:"#f8fafc",border:"1px solid #e2e8f0"}}><div style={{width:7,height:7,borderRadius:"50%",background:tc[a.type]||"#94a3b8",flexShrink:0}}/><span style={{fontSize:11,color:"#94a3b8",flexShrink:0,width:38}}>{a.time}</span><span style={{fontSize:9,fontWeight:600,padding:"2px 7px",borderRadius:10,background:tbg[a.type]||"#f3f4f6",color:tc[a.type]||"#64748b",flexShrink:0}}>{(a.type||"").toUpperCase()}</span>{a.symbol&&<span style={{fontSize:12,fontWeight:700,color:"#1e293b",flexShrink:0,width:50}}>{a.symbol}</span>}<span style={{fontSize:11,color:"#64748b",flex:1}}>{a.message}</span></div>))}</div><button onClick={onClose} style={{width:"100%",padding:11,borderRadius:10,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#64748b",cursor:"pointer",fontSize:13,fontWeight:600,marginTop:14}}>Close</button></div></div>);}
 
 function Sidebar({collapsed,setCollapsed,tab,setTab,stats}){
   const items=[
@@ -136,23 +156,13 @@ function Sidebar({collapsed,setCollapsed,tab,setTab,stats}){
   ];
   return(
     <aside style={{width:collapsed?60:230,background:"#fff",borderRight:"1px solid #e2e8f0",height:"100vh",display:"flex",flexDirection:"column",transition:"width 0.2s",flexShrink:0,overflow:"hidden"}}>
-      <div style={{height:56,display:"flex",alignItems:"center",padding:"0 14px",borderBottom:"1px solid #e2e8f0"}}>
-        {!collapsed&&<div style={{display:"flex",alignItems:"center",gap:8}}><div style={{width:30,height:30,borderRadius:8,background:"#2563eb",display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{color:"#fff",fontWeight:700,fontSize:13}}>B</span></div><div><div style={{fontWeight:700,fontSize:15,color:"#1e293b"}}>BLOOM</div><div style={{fontSize:9,color:"#94a3b8",marginTop:-2}}>Solana Screener v5</div></div></div>}
-        <button onClick={()=>setCollapsed(!collapsed)} style={{marginLeft:"auto",padding:4,borderRadius:6,border:"none",background:"transparent",cursor:"pointer",color:"#94a3b8",display:"flex"}}><svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={collapsed?"M13 5l7 7-7 7M5 5l7 7-7 7":"M11 19l-7-7 7-7m8 14l-7-7 7-7"}/></svg></button>
-      </div>
-      <nav style={{flex:1,padding:"10px 6px",overflowY:"auto"}}>
-        {!collapsed&&<div style={{padding:"0 10px",marginBottom:6,fontSize:9,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:1.5}}>Scanner</div>}
-        <div style={{display:"flex",flexDirection:"column",gap:2}}>{items.map(it=>{const a=tab===it.key;const badge=!collapsed&&it.key==="earlyPump"&&stats?.earlyPumps>0?stats.earlyPumps:!collapsed&&it.key==="trending"&&stats?.trending>0?stats.trending:null;return(<button key={it.key} onClick={()=>setTab(it.key)} title={collapsed?it.label:undefined} style={{display:"flex",alignItems:"center",gap:9,padding:collapsed?"9px":"9px 10px",borderRadius:8,border:"none",background:a?"#eff6ff":"transparent",color:a?"#2563eb":"#64748b",cursor:"pointer",fontSize:12,fontWeight:a?600:500,width:"100%",textAlign:"left",justifyContent:collapsed?"center":"flex-start"}}><svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d={it.d}/></svg>{!collapsed&&it.label}{badge&&<span style={{marginLeft:"auto",fontSize:10,fontWeight:700,color:it.key==="earlyPump"?"#7c3aed":"#b45309",background:it.key==="earlyPump"?"#ede9fe":"#fef3c7",padding:"1px 6px",borderRadius:8}}>{badge}</span>}</button>);})}</div>
-      </nav>
+      <div style={{height:56,display:"flex",alignItems:"center",padding:"0 14px",borderBottom:"1px solid #e2e8f0"}}>{!collapsed&&<div style={{display:"flex",alignItems:"center",gap:8}}><div style={{width:30,height:30,borderRadius:8,background:"#2563eb",display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{color:"#fff",fontWeight:700,fontSize:13}}>B</span></div><div><div style={{fontWeight:700,fontSize:15,color:"#1e293b"}}>BLOOM</div><div style={{fontSize:9,color:"#94a3b8",marginTop:-2}}>v5</div></div></div>}<button onClick={()=>setCollapsed(!collapsed)} style={{marginLeft:"auto",padding:4,borderRadius:6,border:"none",background:"transparent",cursor:"pointer",color:"#94a3b8",display:"flex"}}><svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={collapsed?"M13 5l7 7-7 7M5 5l7 7-7 7":"M11 19l-7-7 7-7m8 14l-7-7 7-7"}/></svg></button></div>
+      <nav style={{flex:1,padding:"10px 6px",overflowY:"auto"}}>{!collapsed&&<div style={{padding:"0 10px",marginBottom:6,fontSize:9,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:1.5}}>Scanner</div>}<div style={{display:"flex",flexDirection:"column",gap:2}}>{items.map(it=>{const a=tab===it.key;const badge=!collapsed&&it.key==="earlyPump"&&stats?.earlyPumps>0?stats.earlyPumps:!collapsed&&it.key==="trending"&&stats?.trending>0?stats.trending:null;return(<button key={it.key} onClick={()=>setTab(it.key)} title={collapsed?it.label:undefined} style={{display:"flex",alignItems:"center",gap:9,padding:collapsed?"9px":"9px 10px",borderRadius:8,border:"none",background:a?"#eff6ff":"transparent",color:a?"#2563eb":"#64748b",cursor:"pointer",fontSize:12,fontWeight:a?600:500,width:"100%",textAlign:"left",justifyContent:collapsed?"center":"flex-start"}}><svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d={it.d}/></svg>{!collapsed&&it.label}{badge&&<span style={{marginLeft:"auto",fontSize:10,fontWeight:700,color:it.key==="earlyPump"?"#7c3aed":"#b45309",background:it.key==="earlyPump"?"#ede9fe":"#fef3c7",padding:"1px 6px",borderRadius:8}}>{badge}</span>}</button>);})}</div></nav>
       <div style={{borderTop:"1px solid #e2e8f0",padding:10}}>{!collapsed?<div style={{display:"flex",justifyContent:"space-between",fontSize:10}}><span style={{color:"#94a3b8"}}>Tracked</span><span style={{fontWeight:700,color:"#1e293b"}}>{stats?.total||0}</span></div>:<div style={{textAlign:"center",fontSize:13,fontWeight:700,color:"#1e293b"}}>{stats?.total||0}</div>}</div>
-    </aside>
-  );
+    </aside>);
 }
 
-function HealthPanel({health,onClose}){
-  const sc={ok:"#16a34a",degraded:"#d97706",down:"#dc2626",unknown:"#94a3b8"};const sb={ok:"#dcfce7",degraded:"#fef3c7",down:"#fee2e2",unknown:"#f3f4f6"};
-  return(<div style={{position:"fixed",inset:0,zIndex:1000,background:"rgba(15,23,42,0.5)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={onClose}><div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:16,width:"100%",maxWidth:500,padding:24,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 25px 50px rgba(0,0,0,0.15)"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}><div style={{fontSize:18,fontWeight:700,color:"#1e293b"}}>System Status</div>{health&&<span style={{fontSize:12,fontWeight:600,padding:"4px 12px",borderRadius:12,background:health.status==="healthy"?"#dcfce7":"#fef3c7",color:health.status==="healthy"?"#16a34a":"#d97706"}}>{health.status?.toUpperCase()}</span>}</div>{!health&&<div style={{textAlign:"center",padding:40,color:"#94a3b8"}}>Loading...</div>}{health&&<><div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:18}}><div style={{background:"#f8fafc",borderRadius:10,padding:"10px 14px",border:"1px solid #e2e8f0"}}><div style={{fontSize:10,color:"#94a3b8"}}>UPTIME</div><div style={{fontSize:15,fontWeight:700}}>{health.uptime?Math.floor(health.uptime/60)+"m":"?"}</div></div><div style={{background:"#f8fafc",borderRadius:10,padding:"10px 14px",border:"1px solid #e2e8f0"}}><div style={{fontSize:10,color:"#94a3b8"}}>SCANS</div><div style={{fontSize:15,fontWeight:700}}>{health.scans||0}</div></div><div style={{background:"#f8fafc",borderRadius:10,padding:"10px 14px",border:"1px solid #e2e8f0"}}><div style={{fontSize:10,color:"#94a3b8"}}>TOKENS</div><div style={{fontSize:15,fontWeight:700}}>{health.tokens||0}</div></div></div><div style={{display:"flex",flexDirection:"column",gap:8}}>{health.services&&Object.entries(health.services).map(([name,svc])=>{const st=svc.status||"unknown";return(<div key={name} style={{background:"#f8fafc",borderRadius:10,padding:14,border:"1px solid #e2e8f0"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}><div style={{display:"flex",alignItems:"center",gap:8}}><div style={{width:9,height:9,borderRadius:"50%",background:sc[st]}}/><span style={{fontSize:13,fontWeight:600,textTransform:"capitalize"}}>{name}</span></div><span style={{fontSize:11,fontWeight:600,padding:"2px 10px",borderRadius:12,background:sb[st],color:sc[st]}}>{st.toUpperCase()}</span></div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4,fontSize:11,color:"#64748b"}}><span>Latency: <b style={{color:svc.latency>2000?"#dc2626":"#1e293b"}}>{svc.latency||0}ms</b></span><span>Errors: <b style={{color:svc.errorCount>0?"#dc2626":"#1e293b"}}>{svc.errorCount||0}</b></span></div></div>);})}</div></>}<button onClick={onClose} style={{width:"100%",padding:11,borderRadius:10,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#64748b",cursor:"pointer",fontSize:13,fontWeight:600,marginTop:14}}>Close</button></div></div>);
-}
+function HealthPanel({health,onClose}){const sc={ok:"#16a34a",degraded:"#d97706",down:"#dc2626",unknown:"#94a3b8"};const sb={ok:"#dcfce7",degraded:"#fef3c7",down:"#fee2e2",unknown:"#f3f4f6"};return(<div style={{position:"fixed",inset:0,zIndex:1000,background:"rgba(15,23,42,0.5)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={onClose}><div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:16,width:"100%",maxWidth:500,padding:24,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 25px 50px rgba(0,0,0,0.15)"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}><div style={{fontSize:18,fontWeight:700,color:"#1e293b"}}>System Status</div>{health&&<span style={{fontSize:12,fontWeight:600,padding:"4px 12px",borderRadius:12,background:health.status==="healthy"?"#dcfce7":"#fef3c7",color:health.status==="healthy"?"#16a34a":"#d97706"}}>{health.status?.toUpperCase()}</span>}</div>{!health&&<div style={{textAlign:"center",padding:40,color:"#94a3b8"}}>Loading...</div>}{health&&<><div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:18}}>{[{l:"UPTIME",v:health.uptime?Math.floor(health.uptime/60)+"m":"?"},{l:"SCANS",v:health.scans||0},{l:"TOKENS",v:health.tokens||0}].map((s,i)=><div key={i} style={{background:"#f8fafc",borderRadius:10,padding:"10px 14px",border:"1px solid #e2e8f0"}}><div style={{fontSize:10,color:"#94a3b8"}}>{s.l}</div><div style={{fontSize:15,fontWeight:700}}>{s.v}</div></div>)}</div><div style={{display:"flex",flexDirection:"column",gap:8}}>{health.services&&Object.entries(health.services).map(([name,svc])=>{const st=svc.status||"unknown";return(<div key={name} style={{background:"#f8fafc",borderRadius:10,padding:14,border:"1px solid #e2e8f0"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}><div style={{display:"flex",alignItems:"center",gap:8}}><div style={{width:9,height:9,borderRadius:"50%",background:sc[st]}}/><span style={{fontSize:13,fontWeight:600,textTransform:"capitalize"}}>{name}</span></div><span style={{fontSize:11,fontWeight:600,padding:"2px 10px",borderRadius:12,background:sb[st],color:sc[st]}}>{st.toUpperCase()}</span></div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4,fontSize:11,color:"#64748b"}}><span>Latency: <b style={{color:svc.latency>2000?"#dc2626":"#1e293b"}}>{svc.latency||0}ms</b></span><span>Errors: <b style={{color:svc.errorCount>0?"#dc2626":"#1e293b"}}>{svc.errorCount||0}</b></span></div></div>);})}</div></>}<button onClick={onClose} style={{width:"100%",padding:11,borderRadius:10,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#64748b",cursor:"pointer",fontSize:13,fontWeight:600,marginTop:14}}>Close</button></div></div>);}
 
 export default function App(){
   const[tokens,setTokens]=useState([]);const[stats,setStatsData]=useState(null);const[alerts,setAlerts]=useState([]);const[loading,setLoading]=useState(true);const[error,setError]=useState(null);
@@ -164,18 +174,7 @@ export default function App(){
   const fetchData=useCallback(async()=>{try{const[t,s,al,h]=await Promise.all([getTokens({sort:sortBy,dir:sortDir}),getStats(),getAlerts(),getHealth().catch(()=>null)]);setTokens(t.tokens||[]);setStatsData(s);setAlerts(al.alerts||[]);if(h)setHealth(h);setLastUpdate(new Date());setError(null);setLoading(false);setBackendAwake(true);}catch(e){setError(e.message);setLoading(false);}},[sortBy,sortDir]);
   useEffect(()=>{if(backendAwake){fetchData();const iv=setInterval(fetchData,15000);return()=>clearInterval(iv);}},[fetchData,backendAwake]);
 
-  const filtered=useMemo(()=>{
-    let l=[...tokens];
-    if(search){const q=search.toLowerCase();l=l.filter(t=>t.name?.toLowerCase().includes(q)||t.symbol?.toLowerCase().includes(q)||t.address?.toLowerCase().includes(q));}
-    if(minScore>0)l=l.filter(t=>t.safety>=minScore);
-    if(tab==="safe")l=l.filter(t=>t.safety>=75);
-    if(tab==="potential")l=l.filter(t=>(t.return_proba?.probability>=40||t.potential>=50)&&t.safety>=50);
-    if(tab==="earlyPump")l=l.filter(t=>t.early_pump_score>=40&&t.safety>=30);
-    if(tab==="danger")l=l.filter(t=>t.safety<25||t.staircase_detected||t.honeypot_detected||t.sell_tax>15);
-    if(tab==="trending")l=l.filter(t=>t.trend_match);
-    if(tab==="watchlist")l=l.filter(t=>watchlist.includes(t.address));
-    return l;
-  },[tokens,search,minScore,tab,watchlist]);
+  const filtered=useMemo(()=>{let l=[...tokens];if(search){const q=search.toLowerCase();l=l.filter(t=>t.name?.toLowerCase().includes(q)||t.symbol?.toLowerCase().includes(q)||t.address?.toLowerCase().includes(q));}if(minScore>0)l=l.filter(t=>t.safety>=minScore);if(tab==="safe")l=l.filter(t=>t.safety>=75);if(tab==="potential")l=l.filter(t=>(t.return_proba?.probability>=40||t.potential>=50)&&t.safety>=50);if(tab==="earlyPump")l=l.filter(t=>t.early_pump_score>=40&&t.safety>=30);if(tab==="danger")l=l.filter(t=>t.safety<25||t.staircase_detected||t.honeypot_detected||t.sell_tax>15);if(tab==="trending")l=l.filter(t=>t.trend_match);if(tab==="watchlist")l=l.filter(t=>watchlist.includes(t.address));return l;},[tokens,search,minScore,tab,watchlist]);
 
   const handleSort=(c)=>{if(sortBy===c)setSortDir(d=>d==="desc"?"asc":"desc");else{setSortBy(c);setSortDir("desc");}};
   const toggleWatch=useCallback((a,e)=>{e.stopPropagation();setWatchlist(w=>w.includes(a)?w.filter(x=>x!==a):[...w,a]);},[]);
@@ -185,48 +184,17 @@ export default function App(){
 
   return(
     <div style={{display:"flex",height:"100vh",overflow:"hidden",background:"#f1f5f9",fontFamily:"'DM Sans',sans-serif"}}>
-      <style>{"@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');:root{--f:'DM Sans',sans-serif}*{box-sizing:border-box;margin:0;padding:0}::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}@keyframes spin{to{transform:rotate(360deg)}}"}</style>
+      <style>{"@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');*{box-sizing:border-box;margin:0;padding:0}::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}@keyframes spin{to{transform:rotate(360deg)}}"}</style>
       <Sidebar collapsed={collapsed} setCollapsed={setCollapsed} tab={tab} setTab={setTab} stats={stats}/>
       <main style={{flex:1,overflowY:"auto",padding:24}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
-          <div>
-            <h1 style={{fontSize:22,fontWeight:700,color:"#1e293b",margin:0}}>{tabLabels[tab]}</h1>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginTop:3}}>
-              <p style={{fontSize:13,color:"#94a3b8",margin:0}}>{!backendAwake?"Waking up backend...":error?"Error: "+error:lastUpdate?"Last scan: "+lastUpdate.toLocaleTimeString("fr-FR"):"Connecting..."}</p>
-              {health&&health.services&&<div style={{display:"flex",gap:4,alignItems:"center"}}>{Object.entries(health.services).map(([n,s])=><div key={n} title={n+": "+s.status} style={{width:7,height:7,borderRadius:"50%",background:s.status==="ok"?"#16a34a":s.status==="degraded"?"#d97706":"#dc2626"}}/>)}</div>}
-            </div>
-          </div>
-          <div style={{display:"flex",gap:8}}>
-            <button onClick={()=>setShowHealth(true)} style={{display:"flex",alignItems:"center",gap:5,padding:"7px 14px",borderRadius:10,border:"1px solid #e2e8f0",background:"#fff",color:"#64748b",cursor:"pointer",fontSize:12,fontWeight:500}}>Status</button>
-            <button onClick={()=>setShowAlerts(true)} style={{display:"flex",alignItems:"center",gap:5,padding:"7px 14px",borderRadius:10,border:"1px solid #e2e8f0",background:"#fff",color:"#64748b",cursor:"pointer",fontSize:12,fontWeight:500,position:"relative"}}>Alerts{alerts.length>0&&<span style={{position:"absolute",top:-4,right:-4,width:18,height:18,borderRadius:9,background:"#dc2626",color:"#fff",fontSize:10,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>{alerts.length}</span>}</button>
-            <button onClick={fetchData} style={{display:"flex",alignItems:"center",gap:5,padding:"7px 14px",borderRadius:10,border:"1px solid #e2e8f0",background:"#fff",color:"#64748b",cursor:"pointer",fontSize:12,fontWeight:500}}>Refresh</button>
-          </div>
+          <div><h1 style={{fontSize:22,fontWeight:700,color:"#1e293b",margin:0}}>{tabLabels[tab]}</h1><div style={{display:"flex",alignItems:"center",gap:8,marginTop:3}}><p style={{fontSize:13,color:"#94a3b8",margin:0}}>{!backendAwake?"Waking up backend...":error?"Error: "+error:lastUpdate?"Last scan: "+lastUpdate.toLocaleTimeString("fr-FR"):"Connecting..."}</p>{health&&health.services&&<div style={{display:"flex",gap:4,alignItems:"center"}}>{Object.entries(health.services).map(([n,s])=><div key={n} title={n+": "+s.status} style={{width:7,height:7,borderRadius:"50%",background:s.status==="ok"?"#16a34a":s.status==="degraded"?"#d97706":"#dc2626"}}/>)}</div>}</div></div>
+          <div style={{display:"flex",gap:8}}><button onClick={()=>setShowHealth(true)} style={{padding:"7px 14px",borderRadius:10,border:"1px solid #e2e8f0",background:"#fff",color:"#64748b",cursor:"pointer",fontSize:12,fontWeight:500}}>Status</button><button onClick={()=>setShowAlerts(true)} style={{padding:"7px 14px",borderRadius:10,border:"1px solid #e2e8f0",background:"#fff",color:"#64748b",cursor:"pointer",fontSize:12,fontWeight:500,position:"relative"}}>Alerts{alerts.length>0&&<span style={{position:"absolute",top:-4,right:-4,width:18,height:18,borderRadius:9,background:"#dc2626",color:"#fff",fontSize:10,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>{alerts.length}</span>}</button><button onClick={fetchData} style={{padding:"7px 14px",borderRadius:10,border:"1px solid #e2e8f0",background:"#fff",color:"#64748b",cursor:"pointer",fontSize:12,fontWeight:500}}>Refresh</button></div>
         </div>
-        {stats&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(130px, 1fr))",gap:10,marginBottom:18}}>
-          <StatCard label="Scanned" value={stats.total}/>
-          <StatCard label="Avg Safety" value={stats.avgScore} color={getScoreColor(stats.avgScore)}/>
-          <StatCard label="Rug Rate" value={stats.rugRate+"%"} color={stats.rugRate>30?"#dc2626":"#d97706"}/>
-          <StatCard label="Early Pumps" value={stats.earlyPumps||0} color="#7c3aed"/>
-          <StatCard label="Smart Money" value={stats.smartMoney||0} color="#1d4ed8"/>
-          <StatCard label="Trending" value={stats.trending||0} color="#b45309"/>
-        </div>}
-        <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
-          <div style={{position:"relative",flex:1,maxWidth:300}}><svg width="16" height="16" fill="none" stroke="#94a3b8" viewBox="0 0 24 24" style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)"}}><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg><input type="text" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search..." style={{width:"100%",padding:"8px 12px 8px 38px",borderRadius:10,border:"1px solid #e2e8f0",background:"#fff",fontSize:13,color:"#1e293b",outline:"none"}}/></div>
-          <div style={{display:"flex",gap:4}}><span style={{fontSize:11,color:"#94a3b8",alignSelf:"center",marginRight:4}}>Min</span>{[0,25,50,75].map(s=>(<button key={s} onClick={()=>setMinScore(s)} style={{padding:"5px 12px",borderRadius:8,border:"1px solid "+(minScore===s?"#2563eb":"#e2e8f0"),background:minScore===s?"#eff6ff":"#fff",color:minScore===s?"#2563eb":"#64748b",cursor:"pointer",fontSize:11,fontWeight:500}}>{s===0?"All":s+"+"}</button>))}</div>
-        </div>
+        {stats&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(130px, 1fr))",gap:10,marginBottom:18}}><StatCard label="Scanned" value={stats.total}/><StatCard label="Avg Safety" value={stats.avgScore} color={getScoreColor(stats.avgScore)}/><StatCard label="Rug Rate" value={stats.rugRate+"%"} color={stats.rugRate>30?"#dc2626":"#d97706"}/><StatCard label="Early Pumps" value={stats.earlyPumps||0} color="#7c3aed"/><StatCard label="Smart Money" value={stats.smartMoney||0} color="#1d4ed8"/><StatCard label="Trending" value={stats.trending||0} color="#b45309"/></div>}
+        <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}><div style={{position:"relative",flex:1,maxWidth:300}}><svg width="16" height="16" fill="none" stroke="#94a3b8" viewBox="0 0 24 24" style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)"}}><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg><input type="text" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search..." style={{width:"100%",padding:"8px 12px 8px 38px",borderRadius:10,border:"1px solid #e2e8f0",background:"#fff",fontSize:13,color:"#1e293b",outline:"none"}}/></div><div style={{display:"flex",gap:4}}><span style={{fontSize:11,color:"#94a3b8",alignSelf:"center",marginRight:4}}>Min</span>{[0,25,50,75].map(s=>(<button key={s} onClick={()=>setMinScore(s)} style={{padding:"5px 12px",borderRadius:8,border:"1px solid "+(minScore===s?"#2563eb":"#e2e8f0"),background:minScore===s?"#eff6ff":"#fff",color:minScore===s?"#2563eb":"#64748b",cursor:"pointer",fontSize:11,fontWeight:500}}>{s===0?"All":s+"+"}</button>))}</div></div>
         {loading&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:80}}><div style={{width:28,height:28,border:"3px solid #e2e8f0",borderTopColor:"#2563eb",borderRadius:"50%",animation:"spin 1s linear infinite",marginBottom:14}}/><div style={{fontSize:13,color:"#94a3b8"}}>{!backendAwake?"Waking up Render (30-50s)...":"Scanning Solana..."}</div></div>}
-        {!loading&&<div style={{background:"#fff",borderRadius:12,border:"1px solid #e2e8f0",overflow:"hidden"}}><div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><thead><tr style={{borderBottom:"1px solid #e2e8f0",background:"#f8fafc"}}>
-          <th style={{width:34,padding:"10px 6px"}}></th>
-          <SortTh col="safety" label="Safe" w={75}/>
-          <SortTh col="return_proba" label="Retour" w={115}/>
-          <th style={{textAlign:"left",padding:"10px 8px",fontSize:10,fontWeight:600,color:"#94a3b8",width:110,textTransform:"uppercase",letterSpacing:0.5}}>Token</th>
-          <th style={{width:100,padding:"10px 8px"}}>Chart</th>
-          <SortTh col="market_cap" label="MCap" w={65}/>
-          <SortTh col="change_24h" label="24H" w={55}/>
-          <SortTh col="liquidity" label="Liq" w={55}/>
-          <th style={{width:150,padding:"10px 8px"}}>Flags</th>
-          <th style={{width:30}}></th>
-        </tr></thead><tbody>
+        {!loading&&<div style={{background:"#fff",borderRadius:12,border:"1px solid #e2e8f0",overflow:"hidden"}}><div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><thead><tr style={{borderBottom:"1px solid #e2e8f0",background:"#f8fafc"}}><th style={{width:34,padding:"10px 6px"}}></th><SortTh col="safety" label="Safe" w={75}/><SortTh col="return_proba" label="Retour" w={115}/><th style={{textAlign:"left",padding:"10px 8px",fontSize:10,fontWeight:600,color:"#94a3b8",width:110,textTransform:"uppercase",letterSpacing:0.5}}>Token</th><th style={{width:100,padding:"10px 8px"}}>Chart</th><SortTh col="market_cap" label="MCap" w={65}/><SortTh col="change_24h" label="24H" w={55}/><SortTh col="liquidity" label="Liq" w={55}/><th style={{width:150,padding:"10px 8px"}}>Flags</th><th style={{width:30}}></th></tr></thead><tbody>
         {filtered.map(tk=>{const isW=watchlist.includes(tk.address);return(<tr key={tk.address||tk.id} onClick={()=>setSelected(tk)} style={{borderBottom:"1px solid #f1f5f9",cursor:"pointer",background:isW?"#fffbeb":"#fff"}} onMouseEnter={e=>e.currentTarget.style.background=isW?"#fef3c7":"#f8fafc"} onMouseLeave={e=>e.currentTarget.style.background=isW?"#fffbeb":"#fff"}>
           <td style={{padding:"8px 6px",textAlign:"center"}}><span onClick={e=>toggleWatch(tk.address,e)} style={{cursor:"pointer",color:isW?"#d97706":"#e2e8f0"}}>{isW?"★":"☆"}</span></td>
           <td style={{padding:"8px"}}><ScoreBadge score={tk.safety} type="safety"/></td>
@@ -236,22 +204,12 @@ export default function App(){
           <td style={{padding:"8px",color:"#64748b"}}>${fmt(tk.market_cap)}</td>
           <td style={{padding:"8px",fontWeight:600,color:tk.change_24h>=0?"#16a34a":"#dc2626"}}>{tk.change_24h>=0?"+":""}{(tk.change_24h||0).toFixed(1)}%</td>
           <td style={{padding:"8px",color:tk.liquidity<5000?"#ea580c":"#64748b"}}>${fmt(tk.liquidity)}</td>
-          <td style={{padding:"8px"}}><div style={{display:"flex",gap:3,flexWrap:"wrap"}}>
-            {tk.early_pump_score>=50&&<FlagBadge label={"🚀 "+tk.early_pump_score} type="pump"/>}
-            {tk.smart_money?.score>=30&&<FlagBadge label={"🐋 "+tk.smart_money.score} type="whale"/>}
-            {tk.trend_match&&<FlagBadge label={"🔥 "+tk.trend_match.term} type="trend"/>}
-            {tk.ai_analysis&&<FlagBadge label={tk.ai_analysis.verdict==="ACHETER"?"🟢 IA":"🔴 IA"} type={tk.ai_analysis.verdict==="ACHETER"?"ok":"danger"}/>}
-            {tk.honeypot_detected&&<FlagBadge label="Honeypot" type="danger"/>}
-            {tk.sell_tax>15&&<FlagBadge label={"Tax "+tk.sell_tax.toFixed(0)+"%"} type="danger"/>}
-            {tk.staircase_detected&&<FlagBadge label="Stairs" type="danger"/>}
-            {tk.social?.score===0&&tk.age_hours>1&&<FlagBadge label="No social" type="warn"/>}
-            {tk.safety>=70&&!tk.staircase_detected&&!tk.honeypot_detected&&!(tk.sell_tax>5)&&!tk.trend_match&&!tk.ai_analysis&&tk.early_pump_score<50&&<FlagBadge label="Clean" type="ok"/>}
-          </div></td>
+          <td style={{padding:"8px"}}><div style={{display:"flex",gap:3,flexWrap:"wrap"}}>{tk.early_pump_score>=50&&<FlagBadge label={"🚀 "+tk.early_pump_score} type="pump"/>}{tk.smart_money?.score>=30&&<FlagBadge label={"🐋 "+tk.smart_money.score} type="whale"/>}{tk.trend_match&&<FlagBadge label={"🔥 "+tk.trend_match.term} type="trend"/>}{tk.ai_analysis&&<FlagBadge label={tk.ai_analysis.verdict==="ACHETER"?"🟢 IA":"🔴 IA"} type={tk.ai_analysis.verdict==="ACHETER"?"ok":"danger"}/>}{tk.honeypot_detected&&<FlagBadge label="Honeypot" type="danger"/>}{tk.sell_tax>15&&<FlagBadge label={"Tax "+tk.sell_tax.toFixed(0)+"%"} type="danger"/>}{tk.staircase_detected&&<FlagBadge label="Stairs" type="danger"/>}{tk.social?.score===0&&tk.age_hours>1&&<FlagBadge label="No social" type="warn"/>}{tk.safety>=70&&!tk.staircase_detected&&!tk.honeypot_detected&&!(tk.sell_tax>8)&&!tk.trend_match&&!tk.ai_analysis&&tk.early_pump_score<50&&<FlagBadge label="Clean" type="ok"/>}</div></td>
           <td style={{padding:"8px 6px",textAlign:"center"}}><span onClick={e=>copyAddr(tk.address,e)} style={{cursor:"pointer",fontSize:12,color:copied===tk.address?"#16a34a":"#cbd5e1"}}>{copied===tk.address?"✓":"⊕"}</span></td>
         </tr>);})}
-        </tbody></table></div>{filtered.length===0&&<div style={{textAlign:"center",padding:50,color:"#94a3b8",fontSize:13}}>{tab==="watchlist"?"No tokens in watchlist":tab==="earlyPump"?"No early pump signals":tab==="trending"?"No trending tokens":tokens.length===0?"Waiting for first scan...":"No tokens match filters"}</div>}</div>}
+        </tbody></table></div>{filtered.length===0&&<div style={{textAlign:"center",padding:50,color:"#94a3b8",fontSize:13}}>{tab==="watchlist"?"No tokens in watchlist":tab==="earlyPump"?"No early pump signals":tokens.length===0?"Waiting for first scan...":"No tokens match filters"}</div>}</div>}
       </main>
-      {selected&&<TokenDetail token={selected} onClose={()=>setSelected(null)}/>}
+      {selected&&<TokenDetail token={selected} onClose={()=>setSelected(null)} onRefresh={fetchData}/>}
       {showAlerts&&<AlertsPanel alerts={alerts} onClose={()=>setShowAlerts(false)}/>}
       {showHealth&&<HealthPanel health={health} onClose={()=>setShowHealth(false)}/>}
     </div>

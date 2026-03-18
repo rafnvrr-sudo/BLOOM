@@ -38,3 +38,13 @@ export async function pingBackend() {
     return false;
   }
 }
+
+export async function analyzeToken(address) {
+  const url = API_BASE + "/api/analyze/" + address;
+  const res = await fetch(url, { method: "POST" });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `API ${res.status}`);
+  }
+  return res.json();
+}

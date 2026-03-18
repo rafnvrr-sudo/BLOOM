@@ -137,6 +137,12 @@ function calcSafety(token) {
   else if (token.change_24h < -30) { checks.post_pump = { pass: false, value: token.change_24h.toFixed(0) + "% decline" }; penalties += 8; }
   if (token.change_1h < -30) { checks.dumping_1h = { pass: false, value: token.change_1h.toFixed(0) + "% 1h" }; penalties += 10; }
 
+  // Very young token penalty (< 30 min = highest risk)
+  if (token.age_hours < 0.5) {
+    checks.very_new = { pass: false, value: Math.round(token.age_hours * 60) + "min" };
+    penalties += 5;
+  }
+
   if (token.rugcheck) {
     const rc = token.rugcheck;
     const mintOk = !rc.mintEnabled; const freezeOk = !rc.freezeEnabled;
@@ -146,7 +152,7 @@ function calcSafety(token) {
     checks.lp_lock = { pass: lpOk, value: rc.lpBurned ? "burned" : rc.lpLocked ? "locked" : "UNLOCKED" };
     if (mintOk) score += 10; if (freezeOk) score += 8; if (lpOk) score += 10;
     if (!lpOk) penalties += 10; if (!mintOk) penalties += 8;
-  } else { checks.contract = { pass: false, value: "pending scan" }; score += 10; }
+  } else { checks.contract = { pass: false, value: "pending scan" }; }
 
   if (token.jupiter && !token.jupiter.error) {
     if (token.buy_slippage !== null && token.buy_slippage !== undefined) {
@@ -158,8 +164,8 @@ function calcSafety(token) {
       if (token.sell_slippage > 20) penalties += 12; else if (token.sell_slippage > 10) penalties += 6;
     }
     if (token.sell_tax !== null && token.sell_tax !== undefined) {
-      checks.sell_tax = { pass: token.sell_tax < 5, value: token.sell_tax.toFixed(1) + "%" };
-      if (token.sell_tax > 30) penalties += 30; else if (token.sell_tax > 15) penalties += 20; else if (token.sell_tax > 5) penalties += 10;
+      checks.sell_tax = { pass: token.sell_tax < 8, value: token.sell_tax.toFixed(1) + "%" };
+      if (token.sell_tax > 30) penalties += 30; else if (token.sell_tax > 15) penalties += 20; else if (token.sell_tax > 8) penalties += 8;
     }
     if (token.honeypot_detected) { checks.honeypot = { pass: false, value: "HONEYPOT" }; penalties += 40; }
   }
@@ -197,9 +203,11 @@ function calcReturnProba(token) {
   if (token.market_cap < 50000) rawScore += 15; else if (token.market_cap < 200000) rawScore += 12;
   else if (token.market_cap < 500000) rawScore += 8; else if (token.market_cap < 1000000) rawScore += 4;
 
-  if (token.change_1h > 100 && token.change_1h < 1000) rawScore += 15;
-  else if (token.change_1h > 30) rawScore += 12; else if (token.change_1h > 10) rawScore += 8;
-  else if (token.change_1h > 0) rawScore += 3;
+  // 1h momentum: moderate gains are better signals than extreme pumps
+  if (token.change_1h > 10 && token.change_1h <= 50) rawScore += 15;
+  else if (token.change_1h > 50 && token.change_1h <= 150) rawScore += 10; // already pumped, less upside
+  else if (token.change_1h > 150) rawScore += 3; // likely post-pump
+  else if (token.change_1h > 0) rawScore += 5;
 
   if (token.change_5m > 20 && token.change_5m < 200) rawScore += 10; else if (token.change_5m > 5) rawScore += 6;
 
@@ -227,15 +235,16 @@ function calcReturnProba(token) {
   if (token.smart_money && token.smart_money.score >= 60) rawScore = Math.min(rawScore + 12, 100);
   else if (token.smart_money && token.smart_money.score >= 30) rawScore = Math.min(rawScore + 5, 100);
 
-  const sigmoid = (x) => 1 / (1 + Math.exp(-0.08 * (x - 50)));
+  // Steeper sigmoid (0.12 vs 0.08) for better mid-range differentiation
+  const sigmoid = (x) => 1 / (1 + Math.exp(-0.12 * (x - 50)));
   const probability = Math.round(5 + sigmoid(rawScore) * 80);
 
   let expectedGain;
-  if (token.market_cap < 30000) expectedGain = 500;
-  else if (token.market_cap < 100000) expectedGain = 200;
-  else if (token.market_cap < 500000) expectedGain = 100;
-  else if (token.market_cap < 2000000) expectedGain = 50;
-  else expectedGain = 20;
+  if (token.market_cap < 30000) expectedGain = 300;
+  else if (token.market_cap < 100000) expectedGain = 150;
+  else if (token.market_cap < 500000) expectedGain = 80;
+  else if (token.market_cap < 2000000) expectedGain = 40;
+  else expectedGain = 15;
 
   if (token.change_24h < -30) expectedGain = Math.round(expectedGain * 0.3);
   if (token.sell_tax > 5) expectedGain = Math.round(expectedGain * 0.5);
@@ -696,41 +705,46 @@ async function analyzeWithGroq(token) {
   const cached = groqAnalysisCache.get(token.address);
   if (cached && (Date.now() - cached.timestamp) < GROQ_CACHE_MS) return cached.analysis;
   const t0 = Date.now();
-  const trendInfo = token.trend_match ? `\nTREND MATCH: "${token.trend_match.term}" (score ${token.trend_match.score}/100)` : "\nPas de trend match.";
-  const returnInfo = token.return_proba ? `\nRETOUR: ${token.return_proba.probability}% de chance de +${token.return_proba.expectedGain}% sur ${token.return_proba.horizon}` : "";
-  const pumpInfo = token.early_pump_score ? `\nEARLY PUMP SCORE: ${token.early_pump_score}/100 (${(token.early_pump_signals||[]).join(", ")})` : "";
-  const smartInfo = token.smart_money ? `\nSMART MONEY: ${token.smart_money.score}/100 (${(token.smart_money.signals||[]).join(", ")})` : "";
-  const socialInfo = token.social ? `\nSOCIAL: ${token.social.score}/100 (${(token.social.signals||[]).join(", ")})` : "";
 
-  const prompt = `Tu es un analyste crypto specialise memecoins Solana. Analyse ce token.
+  const buyRatio24 = token.buys + token.sells > 0 ? ((token.buys / (token.buys + token.sells)) * 100).toFixed(1) : "N/A";
+  const buyRatio1h = token.buys_1h + token.sells_1h > 0 ? ((token.buys_1h / (token.buys_1h + token.sells_1h)) * 100).toFixed(1) : "N/A";
+  const volLiq = token.liquidity > 0 ? (token.volume_24h / token.liquidity).toFixed(1) : "N/A";
 
-TOKEN: ${token.name} (${token.symbol})
-Adresse: ${token.address}
-Age: ${token.age_hours}h | Prix: $${token.price < 0.0001 ? token.price.toExponential(2) : token.price.toFixed(8)}
-MCap: $${formatNum(token.market_cap)} | Liq: $${formatNum(token.liquidity)} | Vol 24h: $${formatNum(token.volume_24h)}
-24h: ${token.change_24h.toFixed(1)}% | 1h: ${token.change_1h.toFixed(1)}% | 5m: ${token.change_5m.toFixed(1)}%
-Buys/Sells 24h: ${token.buys}/${token.sells} | 1h: ${token.buys_1h}/${token.sells_1h}
-SAFETY: ${token.safety}/100
-Rugcheck: ${token.rugcheck ? `Mint=${token.rugcheck.mintEnabled}, Freeze=${token.rugcheck.freezeEnabled}, LP=${token.rugcheck.lpBurned ? "burned" : token.rugcheck.lpLocked ? "locked" : "UNLOCKED"}` : "N/A"}
-Jupiter: Buy slip=${token.buy_slippage != null ? token.buy_slippage.toFixed(1) + "%" : "?"}, Sell slip=${token.sell_slippage != null ? token.sell_slippage.toFixed(1) + "%" : "?"}, Tax=${token.sell_tax != null ? token.sell_tax.toFixed(1) + "%" : "?"}
-Honeypot: ${token.honeypot_detected ? "OUI" : "non"} | Staircase: ${token.staircase_detected ? "OUI" : "non"}
-${trendInfo}${returnInfo}${pumpInfo}${smartInfo}${socialInfo}
+  const prompt = `Tu es un analyste senior specialise memecoins Solana. Fais une analyse complete de confirmation/rejet d'achat.
 
-JSON uniquement, pas de markdown:
-{"verdict":"ACHETER|SURVEILLER|EVITER","resume":"2-3 phrases fr","raisons":["r1","r2","r3"]}`;
+=== TOKEN ===
+Nom: ${token.name} (${token.symbol}) | Age: ${token.age_hours}h
+Prix: $${token.price < 0.0001 ? token.price.toExponential(2) : token.price.toFixed(8)}
+MCap: $${formatNum(token.market_cap)} | Liq: $${formatNum(token.liquidity)} | Vol24h: $${formatNum(token.volume_24h)}
+Vol/Liq: ${volLiq}x | Vol6h: $${formatNum(token.volume_6h)} | Vol1h: $${formatNum(token.volume_1h)}
+
+=== PRICE ACTION ===
+24h: ${token.change_24h.toFixed(1)}% | 6h: ${token.change_6h.toFixed(1)}% | 1h: ${token.change_1h.toFixed(1)}% | 5m: ${token.change_5m.toFixed(1)}%
+Buys/Sells 24h: ${token.buys}/${token.sells} (${buyRatio24}%) | 1h: ${token.buys_1h}/${token.sells_1h} (${buyRatio1h}%)
+Holders: ${token.holders || "?"}
+
+=== SECURITE ===
+Safety: ${token.safety}/100
+Rugcheck: ${token.rugcheck ? `Mint=${token.rugcheck.mintEnabled ? "ENABLED!" : "off"}, Freeze=${token.rugcheck.freezeEnabled ? "ENABLED" : "off"}, LP=${token.rugcheck.lpBurned ? "burned" : token.rugcheck.lpLocked ? "locked" : "UNLOCKED!"}` : "N/A"}
+Jupiter: BuySlip=${token.buy_slippage != null ? token.buy_slippage.toFixed(1) + "%" : "?"}, SellSlip=${token.sell_slippage != null ? token.sell_slippage.toFixed(1) + "%" : "?"}, Tax=${token.sell_tax != null ? token.sell_tax.toFixed(1) + "%" : "?"}
+Honeypot: ${token.honeypot_detected ? "OUI!" : "non"} | Staircase: ${token.staircase_detected ? "OUI " + token.staircase_confidence + "%" : "non"}
+
+=== SIGNAUX ===
+${token.trend_match ? "Trend: " + token.trend_match.term + " (score " + token.trend_match.score + ", " + (token.trend_match.competition||0) + " concurrents)" : "Pas de trend"}
+${token.early_pump_score ? "Early pump: " + token.early_pump_score + "/100 (" + (token.early_pump_signals||[]).join(", ") + ")" : ""}
+${token.smart_money?.score ? "Smart money: " + token.smart_money.score + "/100 (" + (token.smart_money.signals||[]).join(", ") + ")" : ""}
+Social: ${token.social ? token.social.score + "/100 (" + (token.social.signals||[]).join(", ") + ")" : "0"}
+Retour BLOOM: ${token.return_proba ? token.return_proba.probability + "% de +" + token.return_proba.expectedGain + "% sur " + token.return_proba.horizon : "N/A"}
+
+Reponds en JSON UNIQUEMENT (pas de markdown):
+{"verdict":"ACHETER|SURVEILLER|EVITER","confiance":1,"resume":"3-4 phrases fr.","forces":["f1","f2"],"faiblesses":["r1","r2"],"risque_principal":"1 phrase","entry_zone":"condition entree","stop_loss":"niveau SL","take_profit":"objectif TP","horizon":"duree","score_confirmation":50}`;
 
   try {
-    // Back off if too many consecutive errors
     if (groqConsecutiveErrors >= 5) {
-      // Try again after 5 min
       if (Date.now() - (serviceHealth.groq.lastError || 0) < 5 * 60 * 1000) return null;
-      groqConsecutiveErrors = 0; // reset and retry
+      groqConsecutiveErrors = 0;
     }
-
     let res = null;
-    let usedModel = groqActiveModel;
-
-    // Try active model first, then fallbacks
     for (const model of [groqActiveModel, ...GROQ_MODELS.filter(m => m !== groqActiveModel)]) {
       try {
         const controller = new AbortController();
@@ -738,44 +752,29 @@ JSON uniquement, pas de markdown:
         res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${GROQ_API_KEY}` },
-          body: JSON.stringify({ model, messages: [{ role: "system", content: "Analyste crypto. JSON uniquement." }, { role: "user", content: prompt }], temperature: 0.3, max_tokens: 500 }),
+          body: JSON.stringify({ model, messages: [{ role: "system", content: "Analyste crypto senior. JSON uniquement, pas de markdown." }, { role: "user", content: prompt }], temperature: 0.3, max_tokens: 800 }),
           signal: controller.signal,
         });
         clearTimeout(timer);
-
-        if (res.ok) {
-          usedModel = model;
-          if (model !== groqActiveModel) {
-            console.log(`Groq switched to model: ${model}`);
-            groqActiveModel = model;
-          }
-          break;
-        }
-        // Log specific error
-        const errBody = await res.text().catch(() => "");
-        console.error(`Groq model ${model} failed ${res.status}: ${errBody.slice(0, 150)}`);
+        if (res.ok) { if (model !== groqActiveModel) { groqActiveModel = model; console.log(`Groq -> ${model}`); } break; }
+        console.error(`Groq ${model}: ${res.status}`);
         res = null;
-      } catch (fetchErr) {
-        console.error(`Groq model ${model} error: ${fetchErr.message}`);
-        res = null;
-      }
+      } catch (e) { res = null; }
     }
-
     const latency = Date.now() - t0;
-    if (!res || !res.ok) {
-      groqConsecutiveErrors++;
-      updateServiceHealth("groq", false, latency);
-      return null;
-    }
-
+    if (!res || !res.ok) { groqConsecutiveErrors++; updateServiceHealth("groq", false, latency); return null; }
     groqConsecutiveErrors = 0;
     const data = await res.json();
     const content = data.choices?.[0]?.message?.content || "";
     let analysis;
-    try { analysis = JSON.parse(content.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim()); } catch { updateServiceHealth("groq", false, latency); return null; }
+    try { analysis = JSON.parse(content.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim()); } catch { console.error("Groq parse:", content.slice(0, 300)); updateServiceHealth("groq", false, latency); return null; }
     if (!analysis.verdict || !analysis.resume) return null;
-    const v = analysis.verdict.toUpperCase();
-    if (v.includes("ACHET")) analysis.verdict = "ACHETER"; else if (v.includes("SURVEIL")) analysis.verdict = "SURVEILLER"; else analysis.verdict = "EVITER";
+    const vv = analysis.verdict.toUpperCase();
+    if (vv.includes("ACHET")) analysis.verdict = "ACHETER"; else if (vv.includes("SURVEIL")) analysis.verdict = "SURVEILLER"; else analysis.verdict = "EVITER";
+    analysis.confiance = Math.max(1, Math.min(10, parseInt(analysis.confiance) || 5));
+    analysis.score_confirmation = Math.max(1, Math.min(100, parseInt(analysis.score_confirmation) || 50));
+    if (!analysis.forces) analysis.forces = [];
+    if (!analysis.faiblesses) analysis.faiblesses = [];
     serviceHealth.groq.analysesCompleted++;
     updateServiceHealth("groq", true, latency);
     groqAnalysisCache.set(token.address, { analysis, timestamp: Date.now() });
@@ -1148,6 +1147,25 @@ app.get("/api/tokens", (req, res) => {
   res.json({ tokens, total: tokenStore.length, last_scan: lastScan, scan_count: scanCount });
 });
 app.get("/api/tokens/:address", (req, res) => { const t = tokenStore.find(t => t.address === req.params.address); if (!t) return res.status(404).json({ error: "Not found" }); res.json(t); });
+
+// Manual AI analysis on any token
+app.post("/api/analyze/:address", async (req, res) => {
+  if (!GROQ_API_KEY) return res.status(400).json({ error: "GROQ_API_KEY not configured" });
+  const token = tokenStore.find(t => t.address === req.params.address);
+  if (!token) return res.status(404).json({ error: "Token not found in store" });
+  // Force fresh analysis (clear cache for this token)
+  groqAnalysisCache.delete(token.address);
+  try {
+    const analysis = await analyzeWithGroq(token);
+    if (!analysis) return res.status(500).json({ error: "AI analysis failed. Check Groq service status." });
+    // Update token in store
+    token.ai_analysis = analysis;
+    token.ai_analysis_at = Date.now();
+    res.json({ ok: true, analysis, token_symbol: token.symbol });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 app.get("/api/alerts", (req, res) => { res.json({ alerts: alertLog.slice(0, 50) }); });
 app.get("/api/stats", (req, res) => {
   const total = tokenStore.length;
