@@ -49,8 +49,8 @@ function updateServiceHealth(service, success, latencyMs, extra = {}) {
 }
 
 // ─── DISCORD DEDUP ───
-const discordAlerted = new Map(); // address -> timestamp
-const DISCORD_COOLDOWN_MS = 30 * 60 * 1000; // 30 min cooldown per token
+const discordAlerted = new Map();
+const DISCORD_COOLDOWN_MS = parseInt(process.env.DISCORD_COOLDOWN_MIN || "15") * 60 * 1000;
 
 function shouldAlertDiscord(address) {
   const last = discordAlerted.get(address);
@@ -420,7 +420,7 @@ function extractPriceChanges(pair) {
 
 // ─── JUPITER SLIPPAGE & SELL TAX CHECKER ───
 const SOL_MINT = "So11111111111111111111111111111111111111112";
-const JUPITER_QUOTE = "https://api.jup.ag/quote";
+const JUPITER_QUOTE = "https://api.jup.ag/swap/v1/quote";
 const SIMULATE_AMOUNT_SOL = 100000000; // 0.1 SOL in lamports
 
 async function checkSlippageAndTax(tokenMint) {
@@ -428,12 +428,14 @@ async function checkSlippageAndTax(tokenMint) {
 
   try {
     // STEP 1: Simulate BUY (SOL -> Token)
-    const buyRes = await fetch(
-      `${JUPITER_QUOTE}?inputMint=${SOL_MINT}&outputMint=${tokenMint}&amount=${SIMULATE_AMOUNT_SOL}&slippageBps=5000&maxAccounts=20`
-    );
+    const buyUrl = `${JUPITER_QUOTE}?inputMint=${SOL_MINT}&outputMint=${tokenMint}&amount=${SIMULATE_AMOUNT_SOL}&slippageBps=5000`;
+    const buyRes = await fetch(buyUrl);
 
     if (!buyRes.ok) {
-      result.error = "jupiter_buy_quote_failed";
+      const errText = await buyRes.text().catch(() => "");
+      result.error = `buy_quote_${buyRes.status}`;
+      console.log(`  Jupiter buy quote failed for ${tokenMint.slice(0,8)}: ${buyRes.status} ${errText.slice(0,100)}`);
+      updateServiceHealth("jupiter", false, 0);
       return result;
     }
 
@@ -442,27 +444,25 @@ async function checkSlippageAndTax(tokenMint) {
     if (!buyData.outAmount || buyData.outAmount === "0") {
       result.honeypot = true;
       result.error = "no_buy_output";
+      updateServiceHealth("jupiter", true, 0);
       return result;
     }
 
-    // Calculate buy slippage from price impact
     const buyPriceImpact = parseFloat(buyData.priceImpactPct || 0);
     result.buySlippage = Math.abs(buyPriceImpact);
-
     const tokensReceived = buyData.outAmount;
 
-    await new Promise(r => setTimeout(r, 300));
+    await new Promise(r => setTimeout(r, 400));
 
-    // STEP 2: Simulate SELL (Token -> SOL) with the tokens we "received"
-    const sellRes = await fetch(
-      `${JUPITER_QUOTE}?inputMint=${tokenMint}&outputMint=${SOL_MINT}&amount=${tokensReceived}&slippageBps=5000&maxAccounts=20`
-    );
+    // STEP 2: Simulate SELL (Token -> SOL)
+    const sellUrl = `${JUPITER_QUOTE}?inputMint=${tokenMint}&outputMint=${SOL_MINT}&amount=${tokensReceived}&slippageBps=5000`;
+    const sellRes = await fetch(sellUrl);
 
     if (!sellRes.ok) {
-      // Can't get a sell quote = potential honeypot
       result.honeypot = true;
-      result.error = "jupiter_sell_quote_failed";
+      result.error = "sell_quote_failed";
       result.sellTax = 100;
+      updateServiceHealth("jupiter", true, 0);
       return result;
     }
 
@@ -471,34 +471,29 @@ async function checkSlippageAndTax(tokenMint) {
     if (!sellData.outAmount || sellData.outAmount === "0") {
       result.honeypot = true;
       result.sellTax = 100;
+      updateServiceHealth("jupiter", true, 0);
       return result;
     }
 
-    // Calculate sell slippage
     const sellPriceImpact = parseFloat(sellData.priceImpactPct || 0);
     result.sellSlippage = Math.abs(sellPriceImpact);
 
-    // Calculate sell tax: compare SOL out vs SOL in
-    // If we put in 0.1 SOL and get back 0.05 SOL (after accounting for normal slippage),
-    // the difference is the sell tax
     const solBack = parseInt(sellData.outAmount);
-    const expectedBack = SIMULATE_AMOUNT_SOL; // ideally we'd get all SOL back
-    const totalLoss = ((expectedBack - solBack) / expectedBack) * 100;
-
-    // Normal round-trip loss from slippage alone is ~2-5% on low-liq memecoins
-    // Anything above 10% total loss strongly suggests a sell tax
+    const totalLoss = ((SIMULATE_AMOUNT_SOL - solBack) / SIMULATE_AMOUNT_SOL) * 100;
     const estimatedNormalSlippage = result.buySlippage + result.sellSlippage;
-    const taxEstimate = Math.max(0, totalLoss - estimatedNormalSlippage - 2); // 2% buffer for fees
+    const taxEstimate = Math.max(0, totalLoss - estimatedNormalSlippage - 2);
 
     result.sellTax = Math.round(taxEstimate * 10) / 10;
 
-    // Flag as honeypot if sell tax > 30%
     if (result.sellTax > 30) {
       result.honeypot = true;
     }
 
+    updateServiceHealth("jupiter", true, 0);
+
   } catch (err) {
     result.error = err.message;
+    updateServiceHealth("jupiter", false, 0);
   }
 
   return result;
@@ -578,47 +573,37 @@ async function sendDiscordAlert(embed) {
 
 function formatDiscordAlert(token) {
   const safetyEmoji = token.safety >= 75 ? "🟢" : token.safety >= 50 ? "🟡" : token.safety >= 25 ? "🟠" : "🔴";
-  const potEmoji = token.potential >= 70 ? "🚀" : token.potential >= 50 ? "📈" : "📊";
-
-  const warnings = [];
-  if (token.staircase_detected) warnings.push("⚠️ **STAIRCASE PATTERN**");
-  if (token.honeypot_detected) warnings.push("🚫 **HONEYPOT DETECTED**");
-  if (token.sell_tax > 15) warnings.push(`💀 **SELL TAX: ${token.sell_tax.toFixed(1)}%**`);
-
   const color = token.safety >= 75 ? 0x16a34a : token.safety >= 50 ? 0xd97706 : token.safety >= 25 ? 0xea580c : 0xdc2626;
 
-  const fields = [
-    { name: "Safety", value: `${token.safety}/100`, inline: true },
-    { name: "Potential x2", value: `${token.potential}/100 ${potEmoji}`, inline: true },
-    { name: "Price", value: `$${token.price < 0.0001 ? token.price.toExponential(2) : token.price.toFixed(6)}`, inline: true },
-    { name: "MCap", value: `$${formatNum(token.market_cap)}`, inline: true },
-    { name: "Volume 24H", value: `$${formatNum(token.volume_24h)}`, inline: true },
-    { name: "Liquidity", value: `$${formatNum(token.liquidity)}`, inline: true },
-    { name: "Age", value: `${token.age_hours}h`, inline: true },
-    { name: "Buys/Sells", value: `${token.buys}/${token.sells}`, inline: true },
-  ];
+  const lines = [];
+  lines.push(`**Safety:** ${token.safety}/100  |  **Potential x2:** ${token.potential}/100`);
+  lines.push(`**Price:** $${token.price < 0.0001 ? token.price.toExponential(2) : token.price.toFixed(6)}  |  **MCap:** $${formatNum(token.market_cap)}  |  **Liq:** $${formatNum(token.liquidity)}`);
+  lines.push(`**Vol 24H:** $${formatNum(token.volume_24h)}  |  **Age:** ${token.age_hours}h  |  **Buys/Sells:** ${token.buys}/${token.sells}`);
 
-  // Add Jupiter data if available
-  if (token.buy_slippage != null) fields.push({ name: "Buy Slip", value: `${token.buy_slippage.toFixed(1)}%`, inline: true });
-  if (token.sell_tax != null) fields.push({ name: "Sell Tax", value: `${token.sell_tax.toFixed(1)}%`, inline: true });
+  const warns = [];
+  if (token.honeypot_detected) warns.push("🚫 HONEYPOT");
+  if (token.sell_tax > 15) warns.push(`💀 Tax ${token.sell_tax.toFixed(1)}%`);
+  else if (token.sell_tax > 0) warns.push(`⚠️ Tax ${token.sell_tax.toFixed(1)}%`);
+  if (token.staircase_detected) warns.push("📊 Staircase");
+  if (token.buy_slippage > 10) warns.push(`📉 Slip ${token.buy_slippage.toFixed(1)}%`);
+
+  const contract = [];
   if (token.rugcheck) {
-    const rc = token.rugcheck;
-    const rcInfo = [];
-    if (!rc.mintEnabled) rcInfo.push("✅ Mint off");
-    else rcInfo.push("❌ Mint on");
-    if (rc.lpBurned) rcInfo.push("✅ LP burned");
-    else if (rc.lpLocked) rcInfo.push("✅ LP locked");
-    else rcInfo.push("❌ LP unlocked");
-    fields.push({ name: "Contract", value: rcInfo.join(" | "), inline: false });
+    contract.push(token.rugcheck.mintEnabled ? "❌ Mint" : "✅ Mint off");
+    contract.push(token.rugcheck.lpBurned ? "✅ LP burned" : token.rugcheck.lpLocked ? "✅ LP locked" : "❌ LP unlocked");
   }
 
+  if (warns.length > 0) lines.push("\n" + warns.join("  |  "));
+  if (contract.length > 0) lines.push(contract.join("  |  "));
+
+  const dexUrl = token.url || `https://dexscreener.com/solana/${token.pair_address}`;
+  lines.push(`\n[DEX Screener](${dexUrl})  |  [rugcheck](https://rugcheck.xyz/tokens/${token.address})  |  [Solscan](https://solscan.io/token/${token.address})`);
+
   return {
-    title: `${safetyEmoji} ${token.symbol} (${token.name})`,
+    title: `${safetyEmoji} ${token.symbol} — $${formatNum(token.market_cap)} MCap`,
     color,
-    fields,
-    description: warnings.length > 0 ? warnings.join("\n") : undefined,
+    description: lines.join("\n"),
     footer: { text: token.address },
-    url: token.url || `https://dexscreener.com/solana/${token.pair_address}`,
     timestamp: new Date().toISOString(),
   };
 }
