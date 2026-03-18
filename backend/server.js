@@ -162,29 +162,68 @@ function detectStaircase(priceHistory) {
 
 // ─── DEX SCREENER FETCH ───
 async function fetchNewPairs() {
-  try {
-    const res = await fetch("https://api.dexscreener.com/token-pairs/v1/solana/latest?minLiq=1000&minAge=0&maxAge=24");
-    if (!res.ok) {
-      // Fallback to search endpoint
-      const res2 = await fetch("https://api.dexscreener.com/latest/dex/search?q=sol");
-      if (!res2.ok) throw new Error(`DEX Screener: ${res2.status}`);
-      const data2 = await res2.json();
-      return (data2.pairs || []).filter(p => p.chainId === "solana");
-    }
-    const data = await res.json();
-    return data || [];
-  } catch (err) {
-    console.error("DEX Screener fetch error:", err.message);
-    // Try the tokens/trending endpoint as another fallback
+  const allPairs = [];
+
+  // Strategy: multiple search queries to find fresh Solana pairs
+  const queries = [
+    "https://api.dexscreener.com/latest/dex/search?q=pump",       // pump.fun tokens
+    "https://api.dexscreener.com/latest/dex/search?q=SOL%20new",  // new SOL pairs
+    "https://api.dexscreener.com/latest/dex/search?q=raydium%20solana", // raydium pairs
+  ];
+
+  for (const url of queries) {
     try {
-      const res3 = await fetch("https://api.dexscreener.com/token-boosts/latest/v1");
-      if (res3.ok) {
-        const data3 = await res3.json();
-        return (data3 || []).filter(t => t.chainId === "solana");
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        const pairs = (data.pairs || []).filter(p => p.chainId === "solana");
+        allPairs.push(...pairs);
       }
-    } catch (e) { /* silent */ }
-    return [];
+      // Small delay between requests to avoid rate limiting
+      await new Promise(r => setTimeout(r, 300));
+    } catch (err) {
+      console.error("DEX Screener fetch error:", err.message);
+    }
   }
+
+  // Also fetch boosted tokens and resolve their pairs
+  try {
+    const boostRes = await fetch("https://api.dexscreener.com/token-boosts/latest/v1");
+    if (boostRes.ok) {
+      const boosts = await boostRes.json();
+      const solBoosts = (boosts || []).filter(b => b.chainId === "solana").slice(0, 5);
+      for (const boost of solBoosts) {
+        try {
+          const pairRes = await fetch(`https://api.dexscreener.com/latest/dex/search?q=${boost.tokenAddress}`);
+          if (pairRes.ok) {
+            const pairData = await pairRes.json();
+            const pairs = (pairData.pairs || []).filter(p => p.chainId === "solana");
+            allPairs.push(...pairs);
+          }
+          await new Promise(r => setTimeout(r, 200));
+        } catch (e) { /* skip */ }
+      }
+    }
+  } catch (e) {
+    console.error("Boosts fetch error:", e.message);
+  }
+
+  // Deduplicate by pairAddress
+  const seen = new Set();
+  const unique = [];
+  for (const pair of allPairs) {
+    const key = pair.pairAddress || pair.baseToken?.address;
+    if (key && !seen.has(key)) {
+      seen.add(key);
+      unique.push(pair);
+    }
+  }
+
+  // Sort by creation date (newest first) if available
+  unique.sort((a, b) => (b.pairCreatedAt || 0) - (a.pairCreatedAt || 0));
+
+  console.log(`Fetched ${unique.length} unique Solana pairs`);
+  return unique;
 }
 
 // ─── RUGCHECK FETCH ───
