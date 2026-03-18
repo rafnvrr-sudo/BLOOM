@@ -28,60 +28,74 @@ function calcSafety(token) {
   let score = 0;
   const checks = {};
 
-  // Liquidity check
-  const liqOk = token.liquidity >= 5000;
-  checks.liquidity = { pass: liqOk, value: token.liquidity };
-  if (liqOk) score += 15;
+  // Liquidity (0-20 pts)
+  checks.liquidity = { pass: token.liquidity >= 5000, value: "$" + formatNum(token.liquidity) };
+  if (token.liquidity >= 100000) score += 20;
+  else if (token.liquidity >= 50000) score += 16;
+  else if (token.liquidity >= 20000) score += 12;
+  else if (token.liquidity >= 5000) score += 8;
+  else if (token.liquidity >= 1000) score += 3;
 
-  // Holder count
-  const holdOk = token.holders >= 100;
-  checks.holders = { pass: holdOk, value: token.holders };
-  if (token.holders >= 500) score += 15;
-  else if (token.holders >= 100) score += 8;
+  // Volume health - vol/liq ratio indicates real trading (0-12 pts)
+  const volLiqRatio = token.volume_24h / Math.max(token.liquidity, 1);
+  checks.vol_liq_ratio = { pass: volLiqRatio > 0.5 && volLiqRatio < 50, value: volLiqRatio.toFixed(1) + "x" };
+  if (volLiqRatio > 0.5 && volLiqRatio < 50) score += 12;
+  else if (volLiqRatio > 0.2) score += 6;
 
-  // Top 10 concentration
-  const top10Ok = token.top10_pct < 30;
-  checks.top10 = { pass: top10Ok, value: token.top10_pct };
-  if (token.top10_pct < 15) score += 15;
-  else if (token.top10_pct < 30) score += 10;
-  else if (token.top10_pct < 50) score += 3;
-
-  // Age check
+  // Age (0-12 pts) - older = safer
   const ageH = token.age_hours;
-  const ageOk = ageH > 1;
-  checks.age = { pass: ageOk, value: ageH };
-  if (ageH > 24) score += 10;
-  else if (ageH > 6) score += 7;
-  else if (ageH > 1) score += 4;
+  checks.age = { pass: ageH > 2, value: ageH.toFixed(1) + "h" };
+  if (ageH > 48) score += 12;
+  else if (ageH > 12) score += 10;
+  else if (ageH > 6) score += 8;
+  else if (ageH > 2) score += 5;
+  else if (ageH > 0.5) score += 2;
 
-  // rugcheck data (if available)
+  // Buy/sell ratio 24h (0-12 pts)
+  if (token.buys + token.sells > 10) {
+    const ratio24 = token.buys / (token.buys + token.sells);
+    checks.buy_ratio_24h = { pass: ratio24 > 0.45, value: (ratio24 * 100).toFixed(0) + "%" };
+    if (ratio24 > 0.65) score += 12;
+    else if (ratio24 > 0.55) score += 9;
+    else if (ratio24 > 0.45) score += 6;
+    else score += 2;
+  } else {
+    checks.buy_ratio_24h = { pass: false, value: "low txns" };
+  }
+
+  // Buy/sell ratio 1h - recent momentum (0-8 pts)
+  if (token.buys_1h + token.sells_1h > 3) {
+    const ratio1h = token.buys_1h / (token.buys_1h + token.sells_1h);
+    checks.buy_ratio_1h = { pass: ratio1h > 0.45, value: (ratio1h * 100).toFixed(0) + "%" };
+    if (ratio1h > 0.6) score += 8;
+    else if (ratio1h > 0.45) score += 5;
+  } else {
+    checks.buy_ratio_1h = { pass: false, value: "low txns" };
+  }
+
+  // Market cap sanity (0-8 pts) - not too tiny, not dead
+  checks.market_cap = { pass: token.market_cap >= 10000, value: "$" + formatNum(token.market_cap) };
+  if (token.market_cap >= 100000) score += 8;
+  else if (token.market_cap >= 50000) score += 6;
+  else if (token.market_cap >= 10000) score += 4;
+
+  // rugcheck data (0-28 pts when available, 10 pts base when not)
   if (token.rugcheck) {
     const rc = token.rugcheck;
     const mintOk = !rc.mintEnabled;
     const freezeOk = !rc.freezeEnabled;
-    const lpBurnOk = rc.lpBurned || rc.lpLocked;
+    const lpOk = rc.lpBurned || rc.lpLocked;
 
     checks.mint = { pass: mintOk, value: rc.mintEnabled ? "ENABLED" : "disabled" };
     checks.freeze = { pass: freezeOk, value: rc.freezeEnabled ? "ENABLED" : "disabled" };
-    checks.lp_lock = { pass: lpBurnOk, value: rc.lpBurned ? "burned" : rc.lpLocked ? "locked" : "UNLOCKED" };
+    checks.lp_lock = { pass: lpOk, value: rc.lpBurned ? "burned" : rc.lpLocked ? "locked" : "UNLOCKED" };
 
-    if (mintOk) score += 12;
+    if (mintOk) score += 10;
     if (freezeOk) score += 8;
-    if (lpBurnOk) score += 15;
+    if (lpOk) score += 10;
   } else {
-    // No rugcheck data: assume moderate risk
-    checks.mint = { pass: false, value: "unknown" };
-    checks.freeze = { pass: false, value: "unknown" };
-    checks.lp_lock = { pass: false, value: "unknown" };
-    score += 5; // small base
-  }
-
-  // Buy/sell ratio
-  if (token.buys > 0 && token.sells > 0) {
-    const ratio = token.buys / (token.buys + token.sells);
-    checks.buy_ratio = { pass: ratio > 0.5, value: (ratio * 100).toFixed(0) + "%" };
-    if (ratio > 0.7) score += 10;
-    else if (ratio > 0.5) score += 5;
+    checks.contract = { pass: false, value: "pending scan" };
+    score += 10; // neutral base - don't punish too hard for missing data
   }
 
   return { score: Math.min(score, 100), checks };
@@ -91,41 +105,52 @@ function calcSafety(token) {
 function calcPotential(token) {
   let score = 0;
 
-  // Vol/MCap ratio
+  // Vol/MCap ratio (0-20 pts) - high = strong momentum
   const vmRatio = token.volume_24h / Math.max(token.market_cap, 1);
-  if (vmRatio > 5) score += 25;
-  else if (vmRatio > 2) score += 20;
-  else if (vmRatio > 1) score += 15;
-  else if (vmRatio > 0.5) score += 8;
+  if (vmRatio > 5) score += 20;
+  else if (vmRatio > 2) score += 16;
+  else if (vmRatio > 1) score += 12;
+  else if (vmRatio > 0.5) score += 6;
 
-  // Holder growth (if we have historical data)
-  if (token.holders_prev && token.holders > token.holders_prev) {
-    const growth = (token.holders - token.holders_prev) / token.holders_prev;
-    if (growth > 0.3) score += 25;
-    else if (growth > 0.15) score += 20;
-    else if (growth > 0.05) score += 12;
-    else score += 5;
-  }
-
-  // Buy pressure
-  if (token.buys > 0) {
+  // Buy pressure 24h (0-15 pts)
+  if (token.buys + token.sells > 10) {
     const buyRatio = token.buys / Math.max(token.buys + token.sells, 1);
-    if (buyRatio > 0.8) score += 20;
-    else if (buyRatio > 0.7) score += 15;
-    else if (buyRatio > 0.6) score += 10;
+    if (buyRatio > 0.75) score += 15;
+    else if (buyRatio > 0.65) score += 12;
+    else if (buyRatio > 0.55) score += 8;
+    else score += 3;
   }
 
-  // MCap room
+  // Buy pressure 1h - recent momentum (0-15 pts)
+  if (token.buys_1h + token.sells_1h > 3) {
+    const ratio1h = token.buys_1h / (token.buys_1h + token.sells_1h);
+    if (ratio1h > 0.75) score += 15;
+    else if (ratio1h > 0.6) score += 10;
+    else if (ratio1h > 0.5) score += 5;
+  }
+
+  // MCap room (0-15 pts) - lower mcap = more upside
   if (token.market_cap < 50000) score += 15;
   else if (token.market_cap < 200000) score += 12;
-  else if (token.market_cap < 1000000) score += 8;
-  else score += 3;
+  else if (token.market_cap < 500000) score += 8;
+  else if (token.market_cap < 1000000) score += 4;
 
-  // 1h momentum
-  if (token.change_1h > 50 && token.change_1h < 500) score += 15;
+  // 1h price momentum (0-15 pts)
+  if (token.change_1h > 100 && token.change_1h < 1000) score += 15;
+  else if (token.change_1h > 30) score += 12;
   else if (token.change_1h > 10) score += 8;
+  else if (token.change_1h > 0) score += 3;
 
-  // Penalize if staircase detected
+  // 5m momentum - very recent action (0-10 pts)
+  if (token.change_5m > 20 && token.change_5m < 200) score += 10;
+  else if (token.change_5m > 5) score += 6;
+
+  // Liquidity depth relative to mcap (0-10 pts) - healthy ratio
+  const liqMcapRatio = token.liquidity / Math.max(token.market_cap, 1);
+  if (liqMcapRatio > 0.1 && liqMcapRatio < 0.5) score += 10;
+  else if (liqMcapRatio > 0.05) score += 5;
+
+  // Penalize staircase
   if (token.staircase_detected) score = Math.max(score - 30, 0);
 
   return Math.min(Math.round(score), 100);
@@ -382,7 +407,7 @@ async function scanOnce() {
     }
 
     // Fetch rugcheck (rate limit: do max 5 per scan)
-    if (newTokens.length < 5) {
+    if (newTokens.length < 15) {
       token.rugcheck = await fetchRugcheck(token.address);
       // Small delay to avoid rate limiting
       await new Promise(r => setTimeout(r, 200));
@@ -393,6 +418,11 @@ async function scanOnce() {
     token.safety = safetyResult.score;
     token.safety_checks = safetyResult.checks;
     token.potential = calcPotential(token);
+
+    // Log top scoring tokens
+    if (token.safety >= 60 || token.potential >= 50) {
+      console.log(`  ★ ${token.symbol} | Safety:${token.safety} Pot:${token.potential} | MCap:$${formatNum(token.market_cap)} Vol:$${formatNum(token.volume_24h)} Liq:$${formatNum(token.liquidity)} | RC:${token.rugcheck ? "yes" : "no"}`);
+    }
 
     // Store previous holder count for growth tracking
     if (existing) {
