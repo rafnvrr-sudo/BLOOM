@@ -23,9 +23,49 @@ let graduationLog = [];
 let lastScan = null;
 let scanCount = 0;
 
-// ─── SAFETY SCORING ───
+// ─── SERVICE HEALTH TRACKING ───
+const serviceHealth = {
+  dexscreener: { status: "unknown", lastSuccess: null, lastError: null, errorCount: 0, latency: 0, pairsReturned: 0 },
+  rugcheck: { status: "unknown", lastSuccess: null, lastError: null, errorCount: 0, latency: 0, checksCompleted: 0 },
+  jupiter: { status: "unknown", lastSuccess: null, lastError: null, errorCount: 0, latency: 0, checksCompleted: 0 },
+  discord: { status: "unknown", lastSuccess: null, lastError: null, errorCount: 0, latency: 0, alertsSent: 0 },
+};
+
+function updateServiceHealth(service, success, latencyMs, extra = {}) {
+  const s = serviceHealth[service];
+  if (!s) return;
+  s.latency = latencyMs;
+  if (success) {
+    s.status = "ok";
+    s.lastSuccess = Date.now();
+    s.errorCount = 0;
+    Object.assign(s, extra);
+  } else {
+    s.errorCount++;
+    s.lastError = Date.now();
+    s.status = s.errorCount >= 3 ? "down" : "degraded";
+    Object.assign(s, extra);
+  }
+}
+
+// ─── DISCORD DEDUP ───
+const discordAlerted = new Map(); // address -> timestamp
+const DISCORD_COOLDOWN_MS = 30 * 60 * 1000; // 30 min cooldown per token
+
+function shouldAlertDiscord(address) {
+  const last = discordAlerted.get(address);
+  if (last && Date.now() - last < DISCORD_COOLDOWN_MS) return false;
+  discordAlerted.set(address, Date.now());
+  // Clean old entries every 100 tokens
+  if (discordAlerted.size > 500) {
+    const cutoff = Date.now() - DISCORD_COOLDOWN_MS;
+    for (const [k, v] of discordAlerted) { if (v < cutoff) discordAlerted.delete(k); }
+  }
+  return true;
+}
 function calcSafety(token) {
   let score = 0;
+  let penalties = 0;
   const checks = {};
 
   // Liquidity (0-20 pts)
@@ -36,13 +76,17 @@ function calcSafety(token) {
   else if (token.liquidity >= 5000) score += 8;
   else if (token.liquidity >= 1000) score += 3;
 
-  // Volume health - vol/liq ratio indicates real trading (0-12 pts)
+  // Volume health - vol/liq ratio (0-12 pts, PENALTY if > 50x)
   const volLiqRatio = token.volume_24h / Math.max(token.liquidity, 1);
-  checks.vol_liq_ratio = { pass: volLiqRatio > 0.5 && volLiqRatio < 50, value: volLiqRatio.toFixed(1) + "x" };
-  if (volLiqRatio > 0.5 && volLiqRatio < 50) score += 12;
-  else if (volLiqRatio > 0.2) score += 6;
+  const volLiqOk = volLiqRatio > 0.5 && volLiqRatio < 50;
+  checks.vol_liq_ratio = { pass: volLiqOk, value: volLiqRatio.toFixed(1) + "x" };
+  if (volLiqOk) score += 12;
+  else if (volLiqRatio > 0.2 && volLiqRatio <= 50) score += 6;
+  // PENALTY: extreme vol/liq = wash trading or dump
+  if (volLiqRatio > 100) { penalties += 20; checks.vol_liq_ratio.value += " EXTREME"; }
+  else if (volLiqRatio > 50) { penalties += 12; }
 
-  // Age (0-12 pts) - older = safer
+  // Age (0-12 pts)
   const ageH = token.age_hours;
   checks.age = { pass: ageH > 2, value: ageH.toFixed(1) + "h" };
   if (ageH > 48) score += 12;
@@ -63,21 +107,38 @@ function calcSafety(token) {
     checks.buy_ratio_24h = { pass: false, value: "low txns" };
   }
 
-  // Buy/sell ratio 1h - recent momentum (0-8 pts)
+  // Buy/sell ratio 1h (0-8 pts)
   if (token.buys_1h + token.sells_1h > 3) {
     const ratio1h = token.buys_1h / (token.buys_1h + token.sells_1h);
     checks.buy_ratio_1h = { pass: ratio1h > 0.45, value: (ratio1h * 100).toFixed(0) + "%" };
     if (ratio1h > 0.6) score += 8;
     else if (ratio1h > 0.45) score += 5;
+    // PENALTY: heavy recent selling
+    if (ratio1h < 0.3 && token.buys_1h + token.sells_1h > 20) penalties += 8;
   } else {
     checks.buy_ratio_1h = { pass: false, value: "low txns" };
   }
 
-  // Market cap sanity (0-8 pts) - not too tiny, not dead
+  // Market cap sanity (0-8 pts)
   checks.market_cap = { pass: token.market_cap >= 10000, value: "$" + formatNum(token.market_cap) };
   if (token.market_cap >= 100000) score += 8;
   else if (token.market_cap >= 50000) score += 6;
   else if (token.market_cap >= 10000) score += 4;
+
+  // POST-PUMP DETECTION: 24h change strongly negative = already dumped
+  if (token.change_24h < -50) {
+    checks.post_pump = { pass: false, value: token.change_24h.toFixed(0) + "% dump" };
+    penalties += 15;
+  } else if (token.change_24h < -30) {
+    checks.post_pump = { pass: false, value: token.change_24h.toFixed(0) + "% decline" };
+    penalties += 8;
+  }
+
+  // 1h dump detection
+  if (token.change_1h < -30) {
+    checks.dumping_1h = { pass: false, value: token.change_1h.toFixed(0) + "% 1h" };
+    penalties += 10;
+  }
 
   // rugcheck data (0-28 pts when available, 10 pts base when not)
   if (token.rugcheck) {
@@ -93,19 +154,58 @@ function calcSafety(token) {
     if (mintOk) score += 10;
     if (freezeOk) score += 8;
     if (lpOk) score += 10;
+    // PENALTY: LP unlocked is a major red flag
+    if (!lpOk) penalties += 10;
+    // PENALTY: mint enabled = dev can print tokens
+    if (!mintOk) penalties += 8;
   } else {
     checks.contract = { pass: false, value: "pending scan" };
-    score += 10; // neutral base - don't punish too hard for missing data
+    score += 10;
   }
 
-  return { score: Math.min(score, 100), checks };
+  // Jupiter slippage check (0 pts bonus, PENALTY if bad)
+  if (token.jupiter && !token.jupiter.error) {
+    // Buy slippage
+    if (token.buy_slippage !== null && token.buy_slippage !== undefined) {
+      const bsOk = token.buy_slippage < 5;
+      checks.buy_slippage = { pass: bsOk, value: token.buy_slippage.toFixed(1) + "%" };
+      if (token.buy_slippage > 15) penalties += 10;
+      else if (token.buy_slippage > 10) penalties += 5;
+    }
+
+    // Sell slippage
+    if (token.sell_slippage !== null && token.sell_slippage !== undefined) {
+      const ssOk = token.sell_slippage < 8;
+      checks.sell_slippage = { pass: ssOk, value: token.sell_slippage.toFixed(1) + "%" };
+      if (token.sell_slippage > 20) penalties += 12;
+      else if (token.sell_slippage > 10) penalties += 6;
+    }
+
+    // Sell tax (the big one)
+    if (token.sell_tax !== null && token.sell_tax !== undefined) {
+      const taxOk = token.sell_tax < 5;
+      checks.sell_tax = { pass: taxOk, value: token.sell_tax.toFixed(1) + "%" };
+      if (token.sell_tax > 30) penalties += 30;       // almost certainly a honeypot
+      else if (token.sell_tax > 15) penalties += 20;   // heavy hidden tax
+      else if (token.sell_tax > 5) penalties += 10;    // suspicious tax
+    }
+
+    // Honeypot detection
+    if (token.honeypot_detected) {
+      checks.honeypot = { pass: false, value: "HONEYPOT" };
+      penalties += 40; // nuke the score
+    }
+  }
+
+  const finalScore = Math.max(Math.min(score - penalties, 100), 0);
+  return { score: finalScore, checks };
 }
 
 // ─── POTENTIAL SCORING ───
 function calcPotential(token) {
   let score = 0;
 
-  // Vol/MCap ratio (0-20 pts) - high = strong momentum
+  // Vol/MCap ratio (0-20 pts)
   const vmRatio = token.volume_24h / Math.max(token.market_cap, 1);
   if (vmRatio > 5) score += 20;
   else if (vmRatio > 2) score += 16;
@@ -121,7 +221,7 @@ function calcPotential(token) {
     else score += 3;
   }
 
-  // Buy pressure 1h - recent momentum (0-15 pts)
+  // Buy pressure 1h (0-15 pts)
   if (token.buys_1h + token.sells_1h > 3) {
     const ratio1h = token.buys_1h / (token.buys_1h + token.sells_1h);
     if (ratio1h > 0.75) score += 15;
@@ -129,7 +229,7 @@ function calcPotential(token) {
     else if (ratio1h > 0.5) score += 5;
   }
 
-  // MCap room (0-15 pts) - lower mcap = more upside
+  // MCap room (0-15 pts)
   if (token.market_cap < 50000) score += 15;
   else if (token.market_cap < 200000) score += 12;
   else if (token.market_cap < 500000) score += 8;
@@ -141,17 +241,41 @@ function calcPotential(token) {
   else if (token.change_1h > 10) score += 8;
   else if (token.change_1h > 0) score += 3;
 
-  // 5m momentum - very recent action (0-10 pts)
+  // 5m momentum (0-10 pts)
   if (token.change_5m > 20 && token.change_5m < 200) score += 10;
   else if (token.change_5m > 5) score += 6;
 
-  // Liquidity depth relative to mcap (0-10 pts) - healthy ratio
+  // Liq/MCap ratio (0-10 pts)
   const liqMcapRatio = token.liquidity / Math.max(token.market_cap, 1);
   if (liqMcapRatio > 0.1 && liqMcapRatio < 0.5) score += 10;
   else if (liqMcapRatio > 0.05) score += 5;
 
-  // Penalize staircase
+  // PENALTIES
+  // Post-pump dump: token already crashed
+  if (token.change_24h < -50) score = Math.max(score - 30, 0);
+  else if (token.change_24h < -30) score = Math.max(score - 15, 0);
+
+  // Active dump right now
+  if (token.change_1h < -20) score = Math.max(score - 20, 0);
+
+  // Vol/liq extreme = wash trading
+  const volLiq = token.volume_24h / Math.max(token.liquidity, 1);
+  if (volLiq > 100) score = Math.max(score - 15, 0);
+
+  // Staircase
   if (token.staircase_detected) score = Math.max(score - 30, 0);
+
+  // LP not locked with rugcheck data
+  if (token.rugcheck && !token.rugcheck.lpBurned && !token.rugcheck.lpLocked) {
+    score = Math.max(score - 10, 0);
+  }
+
+  // Sell tax kills potential completely
+  if (token.sell_tax > 15) score = Math.max(score - 40, 0);
+  else if (token.sell_tax > 5) score = Math.max(score - 15, 0);
+
+  // Honeypot = zero potential
+  if (token.honeypot_detected) score = 0;
 
   return Math.min(Math.round(score), 100);
 }
@@ -188,30 +312,33 @@ function detectStaircase(priceHistory) {
 // ─── DEX SCREENER FETCH ───
 async function fetchNewPairs() {
   const allPairs = [];
+  const startTime = Date.now();
+  let fetchErrors = 0;
 
-  // Strategy: multiple search queries to find fresh Solana pairs
   const queries = [
-    "https://api.dexscreener.com/latest/dex/search?q=pump",       // pump.fun tokens
-    "https://api.dexscreener.com/latest/dex/search?q=SOL%20new",  // new SOL pairs
-    "https://api.dexscreener.com/latest/dex/search?q=raydium%20solana", // raydium pairs
+    "https://api.dexscreener.com/latest/dex/search?q=pump",
+    "https://api.dexscreener.com/latest/dex/search?q=SOL%20new",
+    "https://api.dexscreener.com/latest/dex/search?q=raydium%20solana",
   ];
 
   for (const url of queries) {
     try {
+      const t0 = Date.now();
       const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
         const pairs = (data.pairs || []).filter(p => p.chainId === "solana");
         allPairs.push(...pairs);
+      } else {
+        fetchErrors++;
       }
-      // Small delay between requests to avoid rate limiting
       await new Promise(r => setTimeout(r, 300));
     } catch (err) {
+      fetchErrors++;
       console.error("DEX Screener fetch error:", err.message);
     }
   }
 
-  // Also fetch boosted tokens and resolve their pairs
   try {
     const boostRes = await fetch("https://api.dexscreener.com/token-boosts/latest/v1");
     if (boostRes.ok) {
@@ -230,33 +357,40 @@ async function fetchNewPairs() {
       }
     }
   } catch (e) {
+    fetchErrors++;
     console.error("Boosts fetch error:", e.message);
   }
 
-  // Deduplicate by pairAddress
   const seen = new Set();
   const unique = [];
   for (const pair of allPairs) {
     const key = pair.pairAddress || pair.baseToken?.address;
-    if (key && !seen.has(key)) {
-      seen.add(key);
-      unique.push(pair);
-    }
+    if (key && !seen.has(key)) { seen.add(key); unique.push(pair); }
   }
 
-  // Sort by creation date (newest first) if available
   unique.sort((a, b) => (b.pairCreatedAt || 0) - (a.pairCreatedAt || 0));
 
-  console.log(`Fetched ${unique.length} unique Solana pairs`);
+  // Track health
+  const latency = Date.now() - startTime;
+  updateServiceHealth("dexscreener", unique.length > 0, latency, { pairsReturned: unique.length });
+
+  console.log(`Fetched ${unique.length} unique Solana pairs (${latency}ms, ${fetchErrors} errors)`);
   return unique;
 }
 
 // ─── RUGCHECK FETCH ───
 async function fetchRugcheck(mintAddress) {
+  const t0 = Date.now();
   try {
     const res = await fetch(`https://api.rugcheck.xyz/v1/tokens/${mintAddress}/report/summary`);
-    if (!res.ok) return null;
+    const latency = Date.now() - t0;
+    if (!res.ok) {
+      updateServiceHealth("rugcheck", false, latency);
+      return null;
+    }
     const data = await res.json();
+    serviceHealth.rugcheck.checksCompleted++;
+    updateServiceHealth("rugcheck", true, latency);
     return {
       mintEnabled: data.risks?.some(r => r.name?.toLowerCase().includes("mint")) || false,
       freezeEnabled: data.risks?.some(r => r.name?.toLowerCase().includes("freeze")) || false,
@@ -266,6 +400,7 @@ async function fetchRugcheck(mintAddress) {
       risks: data.risks || [],
     };
   } catch (err) {
+    updateServiceHealth("rugcheck", false, Date.now() - t0);
     console.error("rugcheck error:", err.message);
     return null;
   }
@@ -273,7 +408,6 @@ async function fetchRugcheck(mintAddress) {
 
 // ─── PRICE HISTORY (from DEX Screener pair data) ───
 function extractPriceChanges(pair) {
-  // DEX Screener gives us price changes at different intervals
   const changes = [];
   if (pair.priceChange) {
     changes.push(pair.priceChange.m5 || 0);
@@ -282,6 +416,92 @@ function extractPriceChanges(pair) {
     changes.push(pair.priceChange.h24 || 0);
   }
   return changes;
+}
+
+// ─── JUPITER SLIPPAGE & SELL TAX CHECKER ───
+const SOL_MINT = "So11111111111111111111111111111111111111112";
+const JUPITER_QUOTE = "https://api.jup.ag/quote";
+const SIMULATE_AMOUNT_SOL = 100000000; // 0.1 SOL in lamports
+
+async function checkSlippageAndTax(tokenMint) {
+  const result = { buySlippage: null, sellSlippage: null, sellTax: null, honeypot: false, error: null };
+
+  try {
+    // STEP 1: Simulate BUY (SOL -> Token)
+    const buyRes = await fetch(
+      `${JUPITER_QUOTE}?inputMint=${SOL_MINT}&outputMint=${tokenMint}&amount=${SIMULATE_AMOUNT_SOL}&slippageBps=5000&maxAccounts=20`
+    );
+
+    if (!buyRes.ok) {
+      result.error = "jupiter_buy_quote_failed";
+      return result;
+    }
+
+    const buyData = await buyRes.json();
+
+    if (!buyData.outAmount || buyData.outAmount === "0") {
+      result.honeypot = true;
+      result.error = "no_buy_output";
+      return result;
+    }
+
+    // Calculate buy slippage from price impact
+    const buyPriceImpact = parseFloat(buyData.priceImpactPct || 0);
+    result.buySlippage = Math.abs(buyPriceImpact);
+
+    const tokensReceived = buyData.outAmount;
+
+    await new Promise(r => setTimeout(r, 300));
+
+    // STEP 2: Simulate SELL (Token -> SOL) with the tokens we "received"
+    const sellRes = await fetch(
+      `${JUPITER_QUOTE}?inputMint=${tokenMint}&outputMint=${SOL_MINT}&amount=${tokensReceived}&slippageBps=5000&maxAccounts=20`
+    );
+
+    if (!sellRes.ok) {
+      // Can't get a sell quote = potential honeypot
+      result.honeypot = true;
+      result.error = "jupiter_sell_quote_failed";
+      result.sellTax = 100;
+      return result;
+    }
+
+    const sellData = await sellRes.json();
+
+    if (!sellData.outAmount || sellData.outAmount === "0") {
+      result.honeypot = true;
+      result.sellTax = 100;
+      return result;
+    }
+
+    // Calculate sell slippage
+    const sellPriceImpact = parseFloat(sellData.priceImpactPct || 0);
+    result.sellSlippage = Math.abs(sellPriceImpact);
+
+    // Calculate sell tax: compare SOL out vs SOL in
+    // If we put in 0.1 SOL and get back 0.05 SOL (after accounting for normal slippage),
+    // the difference is the sell tax
+    const solBack = parseInt(sellData.outAmount);
+    const expectedBack = SIMULATE_AMOUNT_SOL; // ideally we'd get all SOL back
+    const totalLoss = ((expectedBack - solBack) / expectedBack) * 100;
+
+    // Normal round-trip loss from slippage alone is ~2-5% on low-liq memecoins
+    // Anything above 10% total loss strongly suggests a sell tax
+    const estimatedNormalSlippage = result.buySlippage + result.sellSlippage;
+    const taxEstimate = Math.max(0, totalLoss - estimatedNormalSlippage - 2); // 2% buffer for fees
+
+    result.sellTax = Math.round(taxEstimate * 10) / 10;
+
+    // Flag as honeypot if sell tax > 30%
+    if (result.sellTax > 30) {
+      result.honeypot = true;
+    }
+
+  } catch (err) {
+    result.error = err.message;
+  }
+
+  return result;
 }
 
 // ─── PROCESS RAW PAIR INTO TOKEN ───
@@ -334,14 +554,24 @@ function processPair(pair) {
 
 // ─── TELEGRAM ALERT ───
 async function sendDiscordAlert(embed) {
-  if (!DISCORD_WEBHOOK) return;
+  if (!DISCORD_WEBHOOK) {
+    updateServiceHealth("discord", false, 0);
+    return;
+  }
+  const t0 = Date.now();
   try {
-    await fetch(DISCORD_WEBHOOK, {
+    const res = await fetch(DISCORD_WEBHOOK, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ embeds: [embed] }),
     });
+    const latency = Date.now() - t0;
+    const ok = res.status >= 200 && res.status < 300;
+    if (ok) serviceHealth.discord.alertsSent++;
+    updateServiceHealth("discord", ok, latency);
+    if (!ok) console.error("Discord webhook returned:", res.status);
   } catch (err) {
+    updateServiceHealth("discord", false, Date.now() - t0);
     console.error("Discord webhook error:", err.message);
   }
 }
@@ -349,28 +579,45 @@ async function sendDiscordAlert(embed) {
 function formatDiscordAlert(token) {
   const safetyEmoji = token.safety >= 75 ? "🟢" : token.safety >= 50 ? "🟡" : token.safety >= 25 ? "🟠" : "🔴";
   const potEmoji = token.potential >= 70 ? "🚀" : token.potential >= 50 ? "📈" : "📊";
-  const stairWarn = token.staircase_detected ? "\n⚠️ **STAIRCASE PATTERN DETECTED**" : "";
 
-  const color = token.safety >= 75 ? 0x00e676 : token.safety >= 50 ? 0xffab00 : token.safety >= 25 ? 0xff6d00 : 0xff1744;
+  const warnings = [];
+  if (token.staircase_detected) warnings.push("⚠️ **STAIRCASE PATTERN**");
+  if (token.honeypot_detected) warnings.push("🚫 **HONEYPOT DETECTED**");
+  if (token.sell_tax > 15) warnings.push(`💀 **SELL TAX: ${token.sell_tax.toFixed(1)}%**`);
+
+  const color = token.safety >= 75 ? 0x16a34a : token.safety >= 50 ? 0xd97706 : token.safety >= 25 ? 0xea580c : 0xdc2626;
+
+  const fields = [
+    { name: "Safety", value: `${token.safety}/100`, inline: true },
+    { name: "Potential x2", value: `${token.potential}/100 ${potEmoji}`, inline: true },
+    { name: "Price", value: `$${token.price < 0.0001 ? token.price.toExponential(2) : token.price.toFixed(6)}`, inline: true },
+    { name: "MCap", value: `$${formatNum(token.market_cap)}`, inline: true },
+    { name: "Volume 24H", value: `$${formatNum(token.volume_24h)}`, inline: true },
+    { name: "Liquidity", value: `$${formatNum(token.liquidity)}`, inline: true },
+    { name: "Age", value: `${token.age_hours}h`, inline: true },
+    { name: "Buys/Sells", value: `${token.buys}/${token.sells}`, inline: true },
+  ];
+
+  // Add Jupiter data if available
+  if (token.buy_slippage != null) fields.push({ name: "Buy Slip", value: `${token.buy_slippage.toFixed(1)}%`, inline: true });
+  if (token.sell_tax != null) fields.push({ name: "Sell Tax", value: `${token.sell_tax.toFixed(1)}%`, inline: true });
+  if (token.rugcheck) {
+    const rc = token.rugcheck;
+    const rcInfo = [];
+    if (!rc.mintEnabled) rcInfo.push("✅ Mint off");
+    else rcInfo.push("❌ Mint on");
+    if (rc.lpBurned) rcInfo.push("✅ LP burned");
+    else if (rc.lpLocked) rcInfo.push("✅ LP locked");
+    else rcInfo.push("❌ LP unlocked");
+    fields.push({ name: "Contract", value: rcInfo.join(" | "), inline: false });
+  }
 
   return {
     title: `${safetyEmoji} ${token.symbol} (${token.name})`,
     color,
-    fields: [
-      { name: "Safety", value: `${token.safety}/100`, inline: true },
-      { name: "Potential x2", value: `${token.potential}/100 ${potEmoji}`, inline: true },
-      { name: "Price", value: `$${token.price < 0.0001 ? token.price.toExponential(2) : token.price.toFixed(6)}`, inline: true },
-      { name: "MCap", value: `$${formatNum(token.market_cap)}`, inline: true },
-      { name: "Volume 24H", value: `$${formatNum(token.volume_24h)}`, inline: true },
-      { name: "Liquidity", value: `$${formatNum(token.liquidity)}`, inline: true },
-      { name: "Holders", value: `${token.holders}`, inline: true },
-      { name: "Age", value: `${token.age_hours}h`, inline: true },
-      { name: "Buys/Sells", value: `${token.buys}/${token.sells}`, inline: true },
-    ],
-    description: stairWarn || undefined,
-    footer: {
-      text: `${token.address}`,
-    },
+    fields,
+    description: warnings.length > 0 ? warnings.join("\n") : undefined,
+    footer: { text: token.address },
     url: token.url || `https://dexscreener.com/solana/${token.pair_address}`,
     timestamp: new Date().toISOString(),
   };
@@ -406,11 +653,36 @@ async function scanOnce() {
       continue;
     }
 
-    // Fetch rugcheck (rate limit: do max 5 per scan)
+    // Fetch rugcheck (rate limit: do max 15 per scan)
     if (newTokens.length < 15) {
       token.rugcheck = await fetchRugcheck(token.address);
-      // Small delay to avoid rate limiting
       await new Promise(r => setTimeout(r, 200));
+    }
+
+    // Fetch Jupiter slippage & sell tax (max 10 per scan, only for tokens with some liquidity)
+    if (newTokens.length < 10 && token.liquidity >= 1000) {
+      const t0 = Date.now();
+      const jupCheck = await checkSlippageAndTax(token.address);
+      const latency = Date.now() - t0;
+
+      token.jupiter = jupCheck;
+      serviceHealth.jupiter.checksCompleted++;
+      updateServiceHealth("jupiter", !jupCheck.error, latency);
+
+      if (jupCheck.buySlippage !== null) {
+        token.buy_slippage = jupCheck.buySlippage;
+      }
+      if (jupCheck.sellSlippage !== null) {
+        token.sell_slippage = jupCheck.sellSlippage;
+      }
+      if (jupCheck.sellTax !== null) {
+        token.sell_tax = jupCheck.sellTax;
+      }
+      if (jupCheck.honeypot) {
+        token.honeypot_detected = true;
+      }
+
+      await new Promise(r => setTimeout(r, 300));
     }
 
     // Score the token
@@ -420,8 +692,9 @@ async function scanOnce() {
     token.potential = calcPotential(token);
 
     // Log top scoring tokens
+    const jupInfo = token.jupiter ? ` | Slip:${token.buy_slippage?.toFixed(1)||"?"}%/${token.sell_slippage?.toFixed(1)||"?"}% Tax:${token.sell_tax?.toFixed(1)||"?"}%${token.honeypot_detected?" HONEYPOT":""}` : "";
     if (token.safety >= 60 || token.potential >= 50) {
-      console.log(`  ★ ${token.symbol} | Safety:${token.safety} Pot:${token.potential} | MCap:$${formatNum(token.market_cap)} Vol:$${formatNum(token.volume_24h)} Liq:$${formatNum(token.liquidity)} | RC:${token.rugcheck ? "yes" : "no"}`);
+      console.log(`  ★ ${token.symbol} | Safety:${token.safety} Pot:${token.potential} | MCap:$${formatNum(token.market_cap)} Liq:$${formatNum(token.liquidity)} | RC:${token.rugcheck ? "yes" : "no"}${jupInfo}`);
     }
 
     // Store previous holder count for growth tracking
@@ -454,33 +727,42 @@ async function scanOnce() {
       alertLog.unshift(alertMsg);
       if (alertLog.length > 100) alertLog = alertLog.slice(0, 100);
 
-      // Send Discord alert
-      await sendDiscordAlert(formatDiscordAlert(token));
+      // Send Discord alert (with dedup - max once per 30min per token)
+      if (shouldAlertDiscord(token.address)) {
+        await sendDiscordAlert(formatDiscordAlert(token));
+      }
     }
 
     // Danger alert
-    if (token.safety < 20 || token.staircase_detected) {
+    if (token.safety < 20 || token.staircase_detected || token.honeypot_detected || token.sell_tax > 15) {
+      const reasons = [];
+      if (token.honeypot_detected) reasons.push("HONEYPOT detected");
+      if (token.sell_tax > 15) reasons.push("Sell tax " + token.sell_tax.toFixed(1) + "%");
+      if (token.staircase_detected) reasons.push("Staircase pattern " + token.staircase_confidence + "%");
+      if (token.rugcheck?.mintEnabled) reasons.push("Mint enabled");
+      if (token.rugcheck && !token.rugcheck.lpBurned && !token.rugcheck.lpLocked) reasons.push("LP unlocked");
+      if (reasons.length === 0) reasons.push("Safety " + token.safety);
+
       alertLog.unshift({
         id: Date.now() + 1,
         time: new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }),
         type: "danger",
         symbol: token.symbol,
-        message: token.staircase_detected
-          ? `Staircase pattern ${token.staircase_confidence}% confidence`
-          : `Safety ${token.safety}. ${token.rugcheck?.mintEnabled ? "Mint enabled. " : ""}${token.rugcheck?.freezeEnabled ? "Freeze enabled." : ""}`,
+        message: reasons.join(". "),
         score: token.safety,
       });
 
-      // Discord danger warning
-      if (token.staircase_detected) {
+      // Discord danger warning (with dedup)
+      if ((token.honeypot_detected || token.staircase_detected || token.sell_tax > 30) && shouldAlertDiscord("danger-" + token.address)) {
+        const desc = reasons.map(r => "⚠️ **" + r + "**").join("\n");
         await sendDiscordAlert({
           title: `🔴 DANGER: ${token.symbol} (${token.name})`,
-          color: 0xff1744,
-          description: `⚠️ **STAIRCASE PATTERN** detected (${token.staircase_confidence}% confidence)\nArtificial pump pattern. Do NOT buy.`,
+          color: 0xdc2626,
+          description: desc + "\nDo NOT buy this token.",
           fields: [
             { name: "Safety", value: `${token.safety}/100`, inline: true },
             { name: "MCap", value: `$${formatNum(token.market_cap)}`, inline: true },
-            { name: "Top 10 Holders", value: `${token.top10_pct}%`, inline: true },
+            { name: "Sell Tax", value: token.sell_tax != null ? token.sell_tax.toFixed(1) + "%" : "?", inline: true },
           ],
           footer: { text: token.address },
           url: token.url || `https://dexscreener.com/solana/${token.pair_address}`,
@@ -571,7 +853,42 @@ app.get("/api/stats", (req, res) => {
 
 // Health check
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", uptime: process.uptime(), tokens: tokenStore.length, scans: scanCount });
+  const now = Date.now();
+  const formatService = (name) => {
+    const s = serviceHealth[name];
+    return {
+      status: s.status,
+      latency: s.latency,
+      lastSuccess: s.lastSuccess ? new Date(s.lastSuccess).toISOString() : null,
+      lastError: s.lastError ? new Date(s.lastError).toISOString() : null,
+      errorCount: s.errorCount,
+      sinceLastSuccess: s.lastSuccess ? Math.round((now - s.lastSuccess) / 1000) : null,
+      ...Object.fromEntries(
+        Object.entries(s).filter(([k]) => !["status","latency","lastSuccess","lastError","errorCount"].includes(k))
+      ),
+    };
+  };
+
+  res.json({
+    status: Object.values(serviceHealth).every(s => s.status === "ok") ? "healthy" :
+            Object.values(serviceHealth).some(s => s.status === "down") ? "degraded" : "partial",
+    uptime: Math.round(process.uptime()),
+    tokens: tokenStore.length,
+    scans: scanCount,
+    lastScan: lastScan ? new Date(lastScan).toISOString() : null,
+    sinceLastScan: lastScan ? Math.round((now - lastScan) / 1000) : null,
+    services: {
+      dexscreener: formatService("dexscreener"),
+      rugcheck: formatService("rugcheck"),
+      jupiter: formatService("jupiter"),
+      discord: formatService("discord"),
+    },
+  });
+});
+
+// Wake-up ping endpoint (for frontend auto-ping)
+app.get("/api/ping", (req, res) => {
+  res.json({ pong: true, time: new Date().toISOString(), tokens: tokenStore.length });
 });
 
 // ─── START ───

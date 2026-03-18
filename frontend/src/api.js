@@ -29,3 +29,12 @@ export async function getStats() {
 export async function getHealth() {
   return fetchJSON("/api/health");
 }
+
+export async function pingBackend() {
+  try {
+    const res = await fetch(API_BASE + "/api/ping");
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
