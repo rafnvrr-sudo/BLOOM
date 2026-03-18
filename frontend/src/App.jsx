@@ -1,352 +1,159 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { getTokens, getAlerts, getStats } from "./api.js";
 
-// ─── UTILS ───
-function getScoreColor(s){return s>=75?"#00e676":s>=50?"#ffab00":s>=25?"#ff6d00":"#ff1744";}
-function getPotColor(p){return p>=70?"#00e5ff":p>=50?"#7c4dff":p>=30?"#ffab00":"#444";}
-function getScoreLabel(s){return s>=75?"SAFE":s>=50?"CAUTION":s>=25?"RISKY":"DANGER";}
-function getPotLabel(p){return p>=70?"HIGH x2":p>=50?"MODERATE":p>=30?"LOW":"MINIMAL";}
+function getScoreColor(s){return s>=75?"#16a34a":s>=50?"#d97706":s>=25?"#ea580c":"#dc2626";}
+function getScoreBg(s){return s>=75?"#dcfce7":s>=50?"#fef3c7":s>=25?"#ffedd5":"#fee2e2";}
+function getPotColor(p){return p>=70?"#2563eb":p>=50?"#7c3aed":p>=30?"#d97706":"#9ca3af";}
+function getPotBg(p){return p>=70?"#dbeafe":p>=50?"#ede9fe":p>=30?"#fef3c7":"#f3f4f6";}
+function getScoreLabel(s){return s>=75?"Safe":s>=50?"Caution":s>=25?"Risky":"Danger";}
+function getPotLabel(p){return p>=70?"High x2":p>=50?"Moderate":p>=30?"Low":"Minimal";}
 function fmt(n){if(!n)return"0";return n>=1e6?(n/1e6).toFixed(2)+"M":n>=1e3?(n/1e3).toFixed(1)+"K":n.toString();}
 function fmtP(p){if(!p)return"$0";return p<.0001?p.toExponential(2):p<1?p.toFixed(6):p.toFixed(4);}
 
-// ─── MINI COMPONENTS ───
-function MiniChart({data,width=120,height=28,staircase}){
-  if(!data||data.length<2)return <div style={{width,height,background:"rgba(255,255,255,0.02)",borderRadius:3}}/>;
-  const filtered=data.filter(v=>v>0);if(filtered.length<2)return null;
-  const mn=Math.min(...filtered),mx=Math.max(...filtered),r=mx-mn||1;
-  const pts=filtered.map((v,i)=>`${(i/(filtered.length-1))*width},${height-((v-mn)/r)*(height-4)-2}`).join(" ");
-  const col=staircase?"#ff1744":"#00e676";
-  return(<svg width={width} height={height} style={{display:"block"}}><defs><linearGradient id={`mc${staircase?1:0}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={col} stopOpacity="0.12"/><stop offset="100%" stopColor={col} stopOpacity="0"/></linearGradient></defs><polygon points={`0,${height} ${pts} ${width},${height}`} fill={`url(#mc${staircase?1:0})`}/><polyline points={pts} fill="none" stroke={col} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>);
+function ScoreBadge({score,type}){
+  const c=type==="safety"?getScoreColor(score):getPotColor(score);
+  const bg=type==="safety"?getScoreBg(score):getPotBg(score);
+  const lb=type==="safety"?getScoreLabel(score):getPotLabel(score);
+  return(<div style={{display:"flex",alignItems:"center",gap:5}}><span style={{fontSize:13,fontWeight:700,color:c}}>{score}</span><span style={{fontSize:9,fontWeight:600,color:c,background:bg,padding:"2px 7px",borderRadius:12}}>{lb}</span></div>);
 }
 
-function ScoreBar({score,color}){const c=color||getScoreColor(score);return(<div style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:44,height:4,borderRadius:2,background:"rgba(255,255,255,0.05)",overflow:"hidden"}}><div style={{width:`${Math.min(score,100)}%`,height:"100%",borderRadius:2,background:c}}/></div><span style={{color:c,fontSize:11,fontWeight:800,fontFamily:"var(--f)",minWidth:22}}>{score}</span></div>);}
+function MiniChart({data,width=110,height=28,bad}){
+  if(!data||data.length<2)return <div style={{width,height,background:"#f1f5f9",borderRadius:6}}/>;
+  const f=data.filter(v=>v>0);if(f.length<2)return null;
+  const mn=Math.min(...f),mx=Math.max(...f),r=mx-mn||1;
+  const pts=f.map((v,i)=>`${(i/(f.length-1))*width},${height-((v-mn)/r)*(height-4)-2}`).join(" ");
+  const col=bad?"#dc2626":"#16a34a";
+  return(<svg width={width} height={height} style={{display:"block"}}><defs><linearGradient id={"cg"+(bad?1:0)} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={col} stopOpacity="0.15"/><stop offset="100%" stopColor={col} stopOpacity="0"/></linearGradient></defs><polygon points={`0,${height} ${pts} ${width},${height}`} fill={"url(#cg"+(bad?1:0)+")"}/><polyline points={pts} fill="none" stroke={col} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" opacity="0.8"/></svg>);
+}
 
-function Badge({ok,label}){return(<span style={{display:"inline-block",padding:"2px 7px",borderRadius:3,fontSize:9,fontWeight:700,letterSpacing:"0.4px",background:ok?"rgba(0,230,118,0.1)":"rgba(255,23,68,0.1)",color:ok?"#00e676":"#ff1744",border:`1px solid ${ok?"rgba(0,230,118,0.2)":"rgba(255,23,68,0.2)"}`}}>{ok?"✓":"✗"} {label}</span>);}
+function FlagBadge({label,type}){
+  const s={danger:{bg:"#fee2e2",color:"#dc2626",border:"#fecaca"},warn:{bg:"#ffedd5",color:"#ea580c",border:"#fed7aa"},ok:{bg:"#dcfce7",color:"#16a34a",border:"#bbf7d0"}}[type||"danger"];
+  return <span style={{fontSize:10,fontWeight:600,padding:"2px 8px",borderRadius:12,background:s.bg,color:s.color,border:"1px solid "+s.border}}>{label}</span>;
+}
 
-// ─── TOKEN DETAIL MODAL ───
+function Badge({ok,label}){return(<span style={{display:"inline-block",padding:"2px 7px",borderRadius:8,fontSize:10,fontWeight:600,background:ok?"#dcfce7":"#fee2e2",color:ok?"#16a34a":"#dc2626"}}>{ok?"✓":"✗"} {label}</span>);}
+
+function StatCard({label,value,color}){
+  return(<div style={{background:"#fff",borderRadius:12,padding:"16px 20px",border:"1px solid #e2e8f0"}}>
+    <div style={{fontSize:12,color:"#64748b",marginBottom:4}}>{label}</div>
+    <div style={{fontSize:20,fontWeight:700,color:color||"#1e293b"}}>{value}</div>
+  </div>);
+}
+
 function TokenDetail({token,onClose}){
   const br=token.buys/(Math.max(token.buys+token.sells,1))*100;
   const checks=token.safety_checks||{};
   return(
-    <div style={{position:"fixed",inset:0,zIndex:1000,background:"rgba(0,0,0,0.88)",backdropFilter:"blur(10px)",display:"flex",alignItems:"center",justifyContent:"center",padding:12}} onClick={onClose}>
-      <div onClick={e=>e.stopPropagation()} style={{background:"#080a0f",border:"1px solid rgba(255,255,255,0.05)",borderRadius:8,width:"100%",maxWidth:560,padding:22,maxHeight:"92vh",overflowY:"auto"}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:18}}>
-          <div>
-            <div style={{fontSize:9,color:"#333",fontFamily:"var(--f)",marginBottom:3,wordBreak:"break-all"}}>{token.address}</div>
-            <div style={{fontSize:18,fontWeight:800,color:"#e8eaed",fontFamily:"var(--f)"}}>{token.name} <span style={{color:"#333"}}>/ {token.symbol}</span></div>
-          </div>
-          <div style={{display:"flex",gap:14}}>
-            <div style={{textAlign:"center"}}><div style={{fontSize:8,color:"#444",letterSpacing:"1px",marginBottom:2}}>SAFETY</div><div style={{fontSize:26,fontWeight:900,color:getScoreColor(token.safety),fontFamily:"var(--f)",lineHeight:1}}>{token.safety}</div><div style={{fontSize:8,color:getScoreColor(token.safety),letterSpacing:"1px",fontWeight:700}}>{getScoreLabel(token.safety)}</div></div>
-            <div style={{textAlign:"center"}}><div style={{fontSize:8,color:"#444",letterSpacing:"1px",marginBottom:2}}>POTENTIAL</div><div style={{fontSize:26,fontWeight:900,color:getPotColor(token.potential),fontFamily:"var(--f)",lineHeight:1}}>{token.potential}</div><div style={{fontSize:8,color:getPotColor(token.potential),letterSpacing:"1px",fontWeight:700}}>{getPotLabel(token.potential)}</div></div>
-          </div>
+    <div style={{position:"fixed",inset:0,zIndex:1000,background:"rgba(15,23,42,0.5)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:16,width:"100%",maxWidth:560,padding:28,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 25px 50px rgba(0,0,0,0.15)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:20}}>
+          <div><div style={{fontSize:11,color:"#94a3b8",marginBottom:4,wordBreak:"break-all"}}>{token.address}</div><div style={{fontSize:20,fontWeight:700,color:"#1e293b"}}>{token.name} <span style={{color:"#94a3b8",fontWeight:400,fontSize:14}}>/ {token.symbol}</span></div></div>
+          <div style={{display:"flex",gap:12}}><div style={{textAlign:"center"}}><div style={{fontSize:9,color:"#94a3b8",textTransform:"uppercase",letterSpacing:1,marginBottom:2}}>Safety</div><ScoreBadge score={token.safety} type="safety"/></div><div style={{textAlign:"center"}}><div style={{fontSize:9,color:"#94a3b8",textTransform:"uppercase",letterSpacing:1,marginBottom:2}}>Potential</div><ScoreBadge score={token.potential} type="potential"/></div></div>
         </div>
-
-        {/* External Links */}
-        <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
-          {[
-            {label:"DEX Screener",url:token.url||`https://dexscreener.com/solana/${token.pair_address}`},
-            {label:"Birdeye",url:`https://birdeye.so/token/${token.address}?chain=solana`},
-            {label:"Solscan",url:`https://solscan.io/token/${token.address}`},
-            {label:"rugcheck",url:`https://rugcheck.xyz/tokens/${token.address}`},
-          ].map((lk,i)=>(
-            <a key={i} href={lk.url} target="_blank" rel="noopener noreferrer" style={{padding:"3px 10px",borderRadius:3,fontSize:9,fontWeight:600,letterSpacing:"0.5px",background:"rgba(255,255,255,0.03)",color:"#666",border:"1px solid rgba(255,255,255,0.06)",textDecoration:"none",fontFamily:"var(--f)"}}>{lk.label} ↗</a>
-          ))}
+        <div style={{display:"flex",gap:6,marginBottom:16,flexWrap:"wrap"}}>
+          {[{l:"DEX Screener",u:token.url||"https://dexscreener.com/solana/"+token.pair_address},{l:"Birdeye",u:"https://birdeye.so/token/"+token.address+"?chain=solana"},{l:"Solscan",u:"https://solscan.io/token/"+token.address},{l:"rugcheck",u:"https://rugcheck.xyz/tokens/"+token.address}].map((lk,i)=>(<a key={i} href={lk.u} target="_blank" rel="noopener noreferrer" style={{padding:"5px 12px",borderRadius:8,fontSize:11,fontWeight:500,background:"#f8fafc",color:"#475569",border:"1px solid #e2e8f0",textDecoration:"none"}}>{lk.l} ↗</a>))}
         </div>
-
-        {/* Chart */}
-        <div style={{background:"rgba(255,255,255,0.015)",border:"1px solid rgba(255,255,255,0.04)",borderRadius:5,padding:14,marginBottom:14}}>
+        <div style={{background:"#f8fafc",borderRadius:12,padding:14,marginBottom:16,border:"1px solid #e2e8f0"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-            <span style={{fontSize:8,color:"#444",letterSpacing:"1.5px",fontWeight:700}}>PRICE ACTION</span>
-            {token.staircase_detected?(
-              <span style={{padding:"2px 8px",borderRadius:3,fontSize:9,fontWeight:800,background:"rgba(255,23,68,0.1)",color:"#ff1744",border:"1px solid rgba(255,23,68,0.25)"}}>⚠ STAIRCASE {token.staircase_confidence}%</span>
-            ):(
-              <span style={{padding:"2px 8px",borderRadius:3,fontSize:9,fontWeight:600,background:"rgba(0,230,118,0.05)",color:"#00e676",border:"1px solid rgba(0,230,118,0.12)"}}>ORGANIC</span>
-            )}
+            <span style={{fontSize:11,fontWeight:600,color:"#64748b",textTransform:"uppercase",letterSpacing:1}}>Price action</span>
+            {token.staircase_detected?<FlagBadge label={"Staircase "+token.staircase_confidence+"%"} type="danger"/>:<FlagBadge label="Organic" type="ok"/>}
           </div>
-          <MiniChart data={token.price_history} width={500} height={55} staircase={token.staircase_detected}/>
+          <MiniChart data={token.price_history} width={490} height={55} bad={token.staircase_detected}/>
         </div>
-
-        {/* Metrics Grid */}
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
-          {[
-            {l:"PRICE",v:"$"+fmtP(token.price)},{l:"MCAP",v:"$"+fmt(token.market_cap)},{l:"VOL 24H",v:"$"+fmt(token.volume_24h)},
-            {l:"LIQUIDITY",v:"$"+fmt(token.liquidity)},{l:"HOLDERS",v:token.holders?.toLocaleString()||"?"},{l:"AGE",v:token.age_hours+"h"},
-          ].map((m,i)=>(
-            <div key={i} style={{background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.03)",borderRadius:3,padding:"8px 10px"}}>
-              <div style={{fontSize:8,color:"#444",letterSpacing:"1px",fontWeight:600,marginBottom:3}}>{m.l}</div>
-              <div style={{fontSize:13,color:"#e8eaed",fontWeight:700,fontFamily:"var(--f)"}}>{m.v}</div>
-            </div>
-          ))}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:16}}>
+          {[{l:"Price",v:"$"+fmtP(token.price)},{l:"MCap",v:"$"+fmt(token.market_cap)},{l:"Vol 24H",v:"$"+fmt(token.volume_24h)},{l:"Liquidity",v:"$"+fmt(token.liquidity)},{l:"Holders",v:(token.holders||"?").toLocaleString()},{l:"Age",v:token.age_hours+"h"}].map((m,i)=>(<div key={i} style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:10,padding:"10px 12px"}}><div style={{fontSize:9,color:"#94a3b8",fontWeight:600,textTransform:"uppercase",marginBottom:2}}>{m.l}</div><div style={{fontSize:14,color:"#1e293b",fontWeight:700}}>{m.v}</div></div>))}
         </div>
-
-        {/* Buy/Sell */}
-        <div style={{marginBottom:14}}>
-          <div style={{display:"flex",height:6,borderRadius:3,overflow:"hidden",background:"rgba(255,23,68,0.2)"}}>
-            <div style={{width:`${br}%`,background:"#00e676",borderRadius:"3px 0 0 3px"}}/>
-          </div>
-          <div style={{display:"flex",justifyContent:"space-between",marginTop:4,fontSize:9}}>
-            <span style={{color:"#00e676",fontFamily:"var(--f)"}}>BUY {token.buys} ({br.toFixed(0)}%)</span>
-            <span style={{color:"#ff1744",fontFamily:"var(--f)"}}>SELL {token.sells} ({(100-br).toFixed(0)}%)</span>
-          </div>
-        </div>
-
-        {/* Security Audit */}
-        <div style={{marginBottom:14}}>
-          <div style={{fontSize:8,color:"#444",letterSpacing:"1.5px",fontWeight:700,marginBottom:8}}>SECURITY AUDIT</div>
-          <div style={{display:"flex",flexDirection:"column",gap:4}}>
-            {Object.entries(checks).map(([key,c],i)=>(
-              <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 10px",borderRadius:3,background:c.pass?"rgba(0,230,118,0.025)":"rgba(255,23,68,0.025)",border:`1px solid ${c.pass?"rgba(0,230,118,0.06)":"rgba(255,23,68,0.06)"}`}}>
-                <span style={{fontSize:10,color:c.pass?"#888":"#ff6d00"}}>{key.replace(/_/g," ").toUpperCase()}</span>
-                <Badge ok={c.pass} label={String(c.value)}/>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <button onClick={onClose} style={{width:"100%",padding:"9px",border:"1px solid rgba(255,255,255,0.06)",borderRadius:4,background:"rgba(255,255,255,0.02)",color:"#555",cursor:"pointer",fontSize:10,fontWeight:600,letterSpacing:"1px",fontFamily:"var(--f)"}}>CLOSE</button>
+        <div style={{marginBottom:16}}><div style={{display:"flex",height:8,borderRadius:4,overflow:"hidden",background:"#fee2e2"}}><div style={{width:br+"%",background:"#16a34a",borderRadius:"4px 0 0 4px"}}/></div><div style={{display:"flex",justifyContent:"space-between",marginTop:4,fontSize:11}}><span style={{color:"#16a34a",fontWeight:600}}>Buy {token.buys} ({br.toFixed(0)}%)</span><span style={{color:"#dc2626",fontWeight:600}}>Sell {token.sells} ({(100-br).toFixed(0)}%)</span></div></div>
+        <div style={{marginBottom:16}}><div style={{fontSize:11,fontWeight:600,color:"#64748b",textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Security audit</div><div style={{display:"flex",flexDirection:"column",gap:4}}>{Object.entries(checks).map(([k,c],i)=>(<div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 12px",borderRadius:8,background:c.pass?"#f0fdf4":"#fef2f2",border:"1px solid "+(c.pass?"#bbf7d0":"#fecaca")}}><span style={{fontSize:11,color:c.pass?"#166534":"#991b1b",fontWeight:500}}>{k.replace(/_/g," ").toUpperCase()}</span><Badge ok={c.pass} label={String(c.value)}/></div>))}</div></div>
+        <button onClick={onClose} style={{width:"100%",padding:11,borderRadius:10,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#64748b",cursor:"pointer",fontSize:13,fontWeight:600}}>Close</button>
       </div>
     </div>
   );
 }
 
-// ─── ALERTS PANEL ───
 function AlertsPanel({alerts,onClose}){
-  const tc={safe:"#00e676",danger:"#ff1744",potential:"#00e5ff",graduation:"#ff9100",narrative:"#7c4dff"};
+  const tc={safe:"#16a34a",danger:"#dc2626",potential:"#2563eb",graduation:"#ea580c",narrative:"#7c3aed"};
+  const tbg={safe:"#dcfce7",danger:"#fee2e2",potential:"#dbeafe",graduation:"#ffedd5",narrative:"#ede9fe"};
   return(
-    <div style={{position:"fixed",inset:0,zIndex:1000,background:"rgba(0,0,0,0.88)",backdropFilter:"blur(10px)",display:"flex",alignItems:"center",justifyContent:"center",padding:12}} onClick={onClose}>
-      <div onClick={e=>e.stopPropagation()} style={{background:"#080a0f",border:"1px solid rgba(255,255,255,0.05)",borderRadius:8,width:"100%",maxWidth:520,padding:22,maxHeight:"92vh",overflowY:"auto"}}>
-        <div style={{fontSize:14,fontWeight:800,color:"#e8eaed",letterSpacing:"2px",marginBottom:14,fontFamily:"var(--f)"}}>ALERT LOG</div>
-        <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}}>
-          {Object.entries(tc).map(([k,c])=>(<span key={k} style={{display:"flex",alignItems:"center",gap:4,fontSize:9,color:c}}><div style={{width:5,height:5,borderRadius:"50%",background:c}}/>{k.toUpperCase()}</span>))}
-        </div>
-        {alerts.length===0&&<div style={{textAlign:"center",padding:40,color:"#333",fontSize:11}}>No alerts yet. Waiting for scan results...</div>}
-        <div style={{display:"flex",flexDirection:"column",gap:4}}>
-          {alerts.map((a,i)=>(<div key={a.id||i} style={{display:"flex",alignItems:"center",gap:8,padding:"9px 12px",borderRadius:4,background:"rgba(255,255,255,0.012)",border:`1px solid ${tc[a.type]||"#555"}10`}}>
-            <div style={{width:5,height:5,borderRadius:"50%",background:tc[a.type]||"#555",flexShrink:0}}/>
-            <div style={{fontSize:10,color:"#444",fontFamily:"var(--f)",flexShrink:0,width:38}}>{a.time}</div>
-            <div style={{fontSize:8,padding:"1px 5px",borderRadius:2,background:`${tc[a.type]||"#555"}12`,color:tc[a.type]||"#555",fontWeight:700,flexShrink:0,letterSpacing:"0.3px"}}>{a.type?.toUpperCase()}</div>
-            <div style={{fontSize:11,fontWeight:700,color:"#e8eaed",fontFamily:"var(--f)",flexShrink:0,width:48}}>{a.symbol}</div>
-            <div style={{fontSize:10,color:"#777",flex:1}}>{a.message}</div>
-          </div>))}
-        </div>
-        <button onClick={onClose} style={{width:"100%",padding:"9px",border:"1px solid rgba(255,255,255,0.06)",borderRadius:4,background:"rgba(255,255,255,0.02)",color:"#555",cursor:"pointer",fontSize:10,fontWeight:600,letterSpacing:"1px",fontFamily:"var(--f)",marginTop:14}}>CLOSE</button>
+    <div style={{position:"fixed",inset:0,zIndex:1000,background:"rgba(15,23,42,0.5)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:16,width:"100%",maxWidth:540,padding:24,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 25px 50px rgba(0,0,0,0.15)"}}>
+        <div style={{fontSize:18,fontWeight:700,color:"#1e293b",marginBottom:16}}>Alert Log</div>
+        {alerts.length===0&&<div style={{textAlign:"center",padding:40,color:"#94a3b8",fontSize:13}}>No alerts yet.</div>}
+        <div style={{display:"flex",flexDirection:"column",gap:6}}>{alerts.map((a,i)=>(<div key={a.id||i} style={{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",borderRadius:10,background:"#f8fafc",border:"1px solid #e2e8f0"}}><div style={{width:7,height:7,borderRadius:"50%",background:tc[a.type]||"#94a3b8",flexShrink:0}}/><span style={{fontSize:11,color:"#94a3b8",flexShrink:0,width:38}}>{a.time}</span><span style={{fontSize:9,fontWeight:600,padding:"2px 7px",borderRadius:10,background:tbg[a.type]||"#f3f4f6",color:tc[a.type]||"#64748b",flexShrink:0}}>{(a.type||"").toUpperCase()}</span>{a.symbol&&a.symbol!=="—"&&<span style={{fontSize:12,fontWeight:700,color:"#1e293b",flexShrink:0,width:50}}>{a.symbol}</span>}<span style={{fontSize:11,color:"#64748b",flex:1}}>{a.message}</span></div>))}</div>
+        <button onClick={onClose} style={{width:"100%",padding:11,borderRadius:10,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#64748b",cursor:"pointer",fontSize:13,fontWeight:600,marginTop:14}}>Close</button>
       </div>
     </div>
   );
 }
 
-// ─── MAIN APP ───
+function Sidebar({collapsed,setCollapsed,tab,setTab,stats}){
+  const items=[{key:"all",label:"Dashboard",d:"M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"},{key:"safe",label:"Safe Tokens",d:"M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"},{key:"potential",label:"x2 Potential",d:"M13 10V3L4 14h7v7l9-11h-7z"},{key:"danger",label:"Danger Zone",d:"M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"},{key:"watchlist",label:"Watchlist",d:"M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"}];
+  return(
+    <aside style={{width:collapsed?60:230,background:"#fff",borderRight:"1px solid #e2e8f0",height:"100vh",display:"flex",flexDirection:"column",transition:"width 0.2s",flexShrink:0,overflow:"hidden"}}>
+      <div style={{height:56,display:"flex",alignItems:"center",padding:"0 14px",borderBottom:"1px solid #e2e8f0"}}>
+        {!collapsed&&<div style={{display:"flex",alignItems:"center",gap:8}}><div style={{width:30,height:30,borderRadius:8,background:"#2563eb",display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{color:"#fff",fontWeight:700,fontSize:13}}>B</span></div><div><div style={{fontWeight:700,fontSize:15,color:"#1e293b"}}>BLOOM</div><div style={{fontSize:9,color:"#94a3b8",marginTop:-2}}>Solana Screener</div></div></div>}
+        <button onClick={()=>setCollapsed(!collapsed)} style={{marginLeft:"auto",padding:4,borderRadius:6,border:"none",background:"transparent",cursor:"pointer",color:"#94a3b8",display:"flex"}}><svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={collapsed?"M13 5l7 7-7 7M5 5l7 7-7 7":"M11 19l-7-7 7-7m8 14l-7-7 7-7"}/></svg></button>
+      </div>
+      <nav style={{flex:1,padding:"10px 6px",overflowY:"auto"}}>
+        {!collapsed&&<div style={{padding:"0 10px",marginBottom:6,fontSize:9,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:1.5}}>Scanner</div>}
+        <div style={{display:"flex",flexDirection:"column",gap:2}}>{items.map(it=>{const a=tab===it.key;return(<button key={it.key} onClick={()=>setTab(it.key)} title={collapsed?it.label:undefined} style={{display:"flex",alignItems:"center",gap:9,padding:collapsed?"9px":"9px 10px",borderRadius:8,border:"none",background:a?"#eff6ff":"transparent",color:a?"#2563eb":"#64748b",cursor:"pointer",fontSize:12,fontWeight:a?600:500,width:"100%",textAlign:"left",justifyContent:collapsed?"center":"flex-start"}}><svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d={it.d}/></svg>{!collapsed&&it.label}</button>);})}</div>
+      </nav>
+      <div style={{borderTop:"1px solid #e2e8f0",padding:10}}>{!collapsed?<div style={{display:"flex",justifyContent:"space-between",fontSize:10}}><span style={{color:"#94a3b8"}}>Tracked</span><span style={{fontWeight:700,color:"#1e293b"}}>{stats?.total||0}</span></div>:<div style={{textAlign:"center",fontSize:13,fontWeight:700,color:"#1e293b"}}>{stats?.total||0}</div>}</div>
+    </aside>
+  );
+}
+
 export default function App(){
-  const[tokens,setTokens]=useState([]);
-  const[stats,setStatsData]=useState(null);
-  const[alerts,setAlerts]=useState([]);
-  const[loading,setLoading]=useState(true);
-  const[error,setError]=useState(null);
-  const[sortBy,setSortBy]=useState("safety");
-  const[sortDir,setSortDir]=useState("desc");
-  const[minScore,setMinScore]=useState(0);
-  const[selected,setSelected]=useState(null);
-  const[showAlerts,setShowAlerts]=useState(false);
-  const[tab,setTab]=useState("all");
-  const[search,setSearch]=useState("");
-  const[watchlist,setWatchlist]=useState([]);
-  const[copied,setCopied]=useState(null);
-  const[lastUpdate,setLastUpdate]=useState(null);
+  const[tokens,setTokens]=useState([]);const[stats,setStatsData]=useState(null);const[alerts,setAlerts]=useState([]);const[loading,setLoading]=useState(true);const[error,setError]=useState(null);
+  const[sortBy,setSortBy]=useState("safety");const[sortDir,setSortDir]=useState("desc");const[minScore,setMinScore]=useState(0);const[selected,setSelected]=useState(null);const[showAlerts,setShowAlerts]=useState(false);
+  const[tab,setTab]=useState("all");const[search,setSearch]=useState("");const[watchlist,setWatchlist]=useState([]);const[copied,setCopied]=useState(null);const[lastUpdate,setLastUpdate]=useState(null);const[collapsed,setCollapsed]=useState(false);
 
-  // ─── DATA FETCHING ───
-  const fetchData=useCallback(async()=>{
-    try{
-      const[tokensRes,statsRes,alertsRes]=await Promise.all([
-        getTokens({sort:sortBy,dir:sortDir}),
-        getStats(),
-        getAlerts(),
-      ]);
-      setTokens(tokensRes.tokens||[]);
-      setStatsData(statsRes);
-      setAlerts(alertsRes.alerts||[]);
-      setLastUpdate(new Date());
-      setError(null);
-      setLoading(false);
-    }catch(err){
-      setError(err.message);
-      setLoading(false);
-    }
-  },[sortBy,sortDir]);
-
+  const fetchData=useCallback(async()=>{try{const[t,s,a]=await Promise.all([getTokens({sort:sortBy,dir:sortDir}),getStats(),getAlerts()]);setTokens(t.tokens||[]);setStatsData(s);setAlerts(a.alerts||[]);setLastUpdate(new Date());setError(null);setLoading(false);}catch(e){setError(e.message);setLoading(false);}},[sortBy,sortDir]);
   useEffect(()=>{fetchData();const iv=setInterval(fetchData,15000);return()=>clearInterval(iv);},[fetchData]);
 
-  const filtered=useMemo(()=>{
-    let list=[...tokens];
-    if(search){const q=search.toLowerCase();list=list.filter(t=>t.name?.toLowerCase().includes(q)||t.symbol?.toLowerCase().includes(q)||t.address?.toLowerCase().includes(q));}
-    if(minScore>0)list=list.filter(t=>t.safety>=minScore);
-    if(tab==="safe")list=list.filter(t=>t.safety>=75);
-    if(tab==="potential")list=list.filter(t=>t.potential>=50&&t.safety>=50);
-    if(tab==="danger")list=list.filter(t=>t.safety<25||t.staircase_detected);
-    if(tab==="watchlist")list=list.filter(t=>watchlist.includes(t.address));
-    return list;
-  },[tokens,search,minScore,tab,watchlist]);
+  const filtered=useMemo(()=>{let l=[...tokens];if(search){const q=search.toLowerCase();l=l.filter(t=>t.name?.toLowerCase().includes(q)||t.symbol?.toLowerCase().includes(q)||t.address?.toLowerCase().includes(q));}if(minScore>0)l=l.filter(t=>t.safety>=minScore);if(tab==="safe")l=l.filter(t=>t.safety>=75);if(tab==="potential")l=l.filter(t=>t.potential>=50&&t.safety>=50);if(tab==="danger")l=l.filter(t=>t.safety<25||t.staircase_detected);if(tab==="watchlist")l=l.filter(t=>watchlist.includes(t.address));return l;},[tokens,search,minScore,tab,watchlist]);
+  const handleSort=(c)=>{if(sortBy===c)setSortDir(d=>d==="desc"?"asc":"desc");else{setSortBy(c);setSortDir("desc");}};
+  const toggleWatch=useCallback((a,e)=>{e.stopPropagation();setWatchlist(w=>w.includes(a)?w.filter(x=>x!==a):[...w,a]);},[]);
+  const copyAddr=useCallback((a,e)=>{e.stopPropagation();navigator.clipboard.writeText(a).catch(()=>{});setCopied(a);setTimeout(()=>setCopied(null),1500);},[]);
 
-  const handleSort=(col)=>{if(sortBy===col)setSortDir(d=>d==="desc"?"asc":"desc");else{setSortBy(col);setSortDir("desc");}};
-  const toggleWatch=useCallback((addr,e)=>{e.stopPropagation();setWatchlist(w=>w.includes(addr)?w.filter(x=>x!==addr):[...w,addr]);},[]);
-  const copyAddr=useCallback((addr,e)=>{e.stopPropagation();navigator.clipboard.writeText(addr).catch(()=>{});setCopied(addr);setTimeout(()=>setCopied(null),1500);},[]);
-
-  const SortIcon=({col})=>{if(sortBy!==col)return<span style={{color:"#1a1a1a",fontSize:8}}>↕</span>;return<span style={{color:"#00e5ff",fontSize:8}}>{sortDir==="desc"?"↓":"↑"}</span>;};
-
-  const tabs=[
-    {key:"all",label:"ALL",count:tokens.length,color:"#e8eaed"},
-    {key:"safe",label:"SAFE",count:tokens.filter(t=>t.safety>=75).length,color:"#00e676"},
-    {key:"potential",label:"x2 POT",count:tokens.filter(t=>t.potential>=50&&t.safety>=50).length,color:"#00e5ff"},
-    {key:"danger",label:"DANGER",count:tokens.filter(t=>t.safety<25||t.staircase_detected).length,color:"#ff1744"},
-    {key:"watchlist",label:"★ WATCH",count:watchlist.length,color:"#ffab00"},
-  ];
+  const SortTh=({col,label,w})=>(<th onClick={()=>handleSort(col)} style={{textAlign:"left",padding:"10px 8px",fontSize:10,fontWeight:600,color:sortBy===col?"#2563eb":"#94a3b8",cursor:"pointer",whiteSpace:"nowrap",userSelect:"none",width:w,textTransform:"uppercase",letterSpacing:0.5}}>{label} {sortBy===col&&(sortDir==="desc"?"↓":"↑")}</th>);
+  const tabLabels={all:"All Tokens",safe:"Safe Tokens",potential:"x2 Potential",danger:"Danger Zone",watchlist:"Watchlist"};
 
   return(
-    <div style={{minHeight:"100vh",background:"#060810",color:"#e8eaed",fontFamily:"'IBM Plex Mono', monospace",padding:14,boxSizing:"border-box"}}>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&display=swap');
-        :root{--f:'IBM Plex Mono',monospace}*{box-sizing:border-box}
-        ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:#080a0f}::-webkit-scrollbar-thumb{background:#151820;border-radius:2px}
-        @keyframes pd{0%,100%{opacity:1}50%{opacity:.3}}
-        @keyframes spin{to{transform:rotate(360deg)}}
-      `}</style>
-
-      {/* HEADER */}
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,paddingBottom:12,borderBottom:"1px solid rgba(255,255,255,0.025)",flexWrap:"wrap",gap:8}}>
-        <div>
-          <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:2}}>
-            <div style={{width:6,height:6,borderRadius:"50%",background:error?"#ff1744":"#00e676",animation:error?"none":"pd 2s ease-in-out infinite",boxShadow:error?"none":"0 0 6px rgba(0,230,118,0.4)"}}/>
-            <span style={{fontSize:14,fontWeight:700,letterSpacing:"2px"}}>SOLANA SCREENER</span>
-            <span style={{fontSize:9,color:"#333",letterSpacing:"1px",marginLeft:4}}>LIVE</span>
-          </div>
-          <div style={{fontSize:8,color:"#222",letterSpacing:"1px"}}>
-            {error?`CONNECTION ERROR: ${error}`:lastUpdate?`Last scan: ${lastUpdate.toLocaleTimeString("fr-FR")}`:"Connecting..."}
+    <div style={{display:"flex",height:"100vh",overflow:"hidden",background:"#f1f5f9",fontFamily:"'DM Sans',sans-serif"}}>
+      <style>{"@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');:root{--f:'DM Sans',sans-serif}*{box-sizing:border-box;margin:0;padding:0}::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}@keyframes spin{to{transform:rotate(360deg)}}"}</style>
+      <Sidebar collapsed={collapsed} setCollapsed={setCollapsed} tab={tab} setTab={setTab} stats={stats}/>
+      <main style={{flex:1,overflowY:"auto",padding:24}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+          <div><h1 style={{fontSize:22,fontWeight:700,color:"#1e293b",margin:0}}>{tabLabels[tab]}</h1><p style={{fontSize:13,color:"#94a3b8",marginTop:2}}>{error?"Error: "+error:lastUpdate?"Last scan: "+lastUpdate.toLocaleTimeString("fr-FR"):"Connecting..."}</p></div>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>setShowAlerts(true)} style={{display:"flex",alignItems:"center",gap:5,padding:"7px 14px",borderRadius:10,border:"1px solid #e2e8f0",background:"#fff",color:"#64748b",cursor:"pointer",fontSize:12,fontWeight:500,position:"relative"}}><svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg>Alerts{alerts.length>0&&<span style={{position:"absolute",top:-4,right:-4,width:18,height:18,borderRadius:9,background:"#dc2626",color:"#fff",fontSize:10,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>{alerts.length}</span>}</button>
+            <button onClick={fetchData} style={{display:"flex",alignItems:"center",gap:5,padding:"7px 14px",borderRadius:10,border:"1px solid #e2e8f0",background:"#fff",color:"#64748b",cursor:"pointer",fontSize:12,fontWeight:500}}><svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>Refresh</button>
           </div>
         </div>
-        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-          <button onClick={()=>setShowAlerts(true)} style={{padding:"4px 10px",border:"1px solid rgba(255,255,255,0.06)",borderRadius:3,background:"rgba(255,255,255,0.015)",color:"#666",cursor:"pointer",fontSize:9,fontWeight:600,letterSpacing:"1px",fontFamily:"var(--f)",display:"flex",alignItems:"center",gap:5}}>
-            ALERTS {alerts.length>0&&<span style={{fontSize:8,padding:"0 4px",borderRadius:2,background:"rgba(255,23,68,0.12)",color:"#ff1744",fontWeight:700}}>{alerts.length}</span>}
-          </button>
-          <button onClick={fetchData} style={{padding:"4px 10px",border:"1px solid rgba(255,255,255,0.06)",borderRadius:3,background:"rgba(255,255,255,0.015)",color:"#666",cursor:"pointer",fontSize:9,fontWeight:600,letterSpacing:"1px",fontFamily:"var(--f)"}}>REFRESH</button>
+        {stats&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(150px, 1fr))",gap:10,marginBottom:18}}><StatCard label="Scanned" value={stats.total}/><StatCard label="Avg Safety" value={stats.avgScore} color={getScoreColor(stats.avgScore)}/><StatCard label="Rug Rate" value={stats.rugRate+"%"} color={stats.rugRate>30?"#dc2626":"#d97706"}/><StatCard label="Staircases" value={stats.stairs} color="#dc2626"/><StatCard label="Best Safety" value={stats.bestSafety?stats.bestSafety.symbol+" ("+stats.bestSafety.score+")":"—"} color="#16a34a"/></div>}
+        <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
+          <div style={{position:"relative",flex:1,maxWidth:300}}><svg width="16" height="16" fill="none" stroke="#94a3b8" viewBox="0 0 24 24" style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)"}}><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg><input type="text" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search..." style={{width:"100%",padding:"8px 12px 8px 38px",borderRadius:10,border:"1px solid #e2e8f0",background:"#fff",fontSize:13,color:"#1e293b",outline:"none"}}/></div>
+          <div style={{display:"flex",gap:4}}><span style={{fontSize:11,color:"#94a3b8",alignSelf:"center",marginRight:4}}>Min</span>{[0,25,50,75].map(s=>(<button key={s} onClick={()=>setMinScore(s)} style={{padding:"5px 12px",borderRadius:8,border:"1px solid "+(minScore===s?"#2563eb":"#e2e8f0"),background:minScore===s?"#eff6ff":"#fff",color:minScore===s?"#2563eb":"#64748b",cursor:"pointer",fontSize:11,fontWeight:500}}>{s===0?"All":s+"+"}</button>))}</div>
         </div>
-      </div>
-
-      {/* STATS */}
-      {stats&&(
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(110px, 1fr))",gap:6,marginBottom:12}}>
-          {[
-            {l:"SCANNED",v:stats.total,c:"#e8eaed"},
-            {l:"AVG SCORE",v:stats.avgScore,c:getScoreColor(stats.avgScore)},
-            {l:"RUG RATE",v:stats.rugRate+"%",c:stats.rugRate>30?"#ff1744":"#ffab00"},
-            {l:"STAIRCASES",v:stats.stairs,c:"#ff1744"},
-            {l:"BEST SAFETY",v:stats.bestSafety?stats.bestSafety.symbol+" ("+stats.bestSafety.score+")":"—",c:"#00e676"},
-            {l:"SCANS",v:stats.scanCount,c:"#999"},
-          ].map((s,i)=>(
-            <div key={i} style={{background:"rgba(255,255,255,0.012)",border:"1px solid rgba(255,255,255,0.025)",borderRadius:4,padding:"8px 10px"}}>
-              <div style={{fontSize:7,color:"#333",letterSpacing:"1px",fontWeight:600,marginBottom:3}}>{s.l}</div>
-              <div style={{fontSize:12,color:s.c,fontWeight:700,fontFamily:"var(--f)"}}>{s.v}</div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* SEARCH */}
-      <div style={{marginBottom:10}}>
-        <input type="text" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search by name, symbol, or address..."
-          style={{width:"100%",maxWidth:360,padding:"7px 12px",background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.05)",borderRadius:4,color:"#e8eaed",fontSize:11,fontFamily:"var(--f)",outline:"none"}}/>
-      </div>
-
-      {/* TABS */}
-      <div style={{display:"flex",gap:3,marginBottom:10,flexWrap:"wrap"}}>
-        {tabs.map(t=>(
-          <button key={t.key} onClick={()=>setTab(t.key)} style={{padding:"4px 12px",border:"1px solid",borderColor:tab===t.key?t.color+"33":"rgba(255,255,255,0.03)",borderRadius:3,background:tab===t.key?t.color+"08":"transparent",color:tab===t.key?t.color:"#333",cursor:"pointer",fontSize:9,fontWeight:600,letterSpacing:"0.5px",fontFamily:"var(--f)",display:"flex",alignItems:"center",gap:5}}>
-            {t.label}<span style={{fontSize:8,padding:"0 4px",borderRadius:2,background:tab===t.key?t.color+"12":"rgba(255,255,255,0.02)",color:tab===t.key?t.color:"#222"}}>{t.count}</span>
-          </button>
-        ))}
-      </div>
-
-      {/* MIN SCORE */}
-      <div style={{display:"flex",gap:3,marginBottom:12,alignItems:"center"}}>
-        <span style={{fontSize:8,color:"#222",letterSpacing:"1px",marginRight:3}}>MIN SAFETY</span>
-        {[0,25,50,75].map(s=>(
-          <button key={s} onClick={()=>setMinScore(s)} style={{padding:"3px 9px",border:"1px solid",borderColor:minScore===s?"rgba(0,230,118,0.2)":"rgba(255,255,255,0.03)",borderRadius:3,background:minScore===s?"rgba(0,230,118,0.05)":"transparent",color:minScore===s?"#00e676":"#333",cursor:"pointer",fontSize:9,fontWeight:600,fontFamily:"var(--f)"}}>{s===0?"ALL":s+"+"}</button>
-        ))}
-      </div>
-
-      {/* LOADING STATE */}
-      {loading&&(
-        <div style={{textAlign:"center",padding:60}}>
-          <div style={{width:24,height:24,border:"2px solid rgba(255,255,255,0.1)",borderTopColor:"#00e5ff",borderRadius:"50%",animation:"spin 1s linear infinite",margin:"0 auto 12px"}}/>
-          <div style={{fontSize:11,color:"#444",letterSpacing:"1px"}}>SCANNING SOLANA NETWORK...</div>
-        </div>
-      )}
-
-      {/* TABLE */}
-      {!loading&&(
-        <div style={{overflowX:"auto"}}>
-          <table style={{width:"100%",borderCollapse:"collapse",fontSize:10}}>
-            <thead>
-              <tr style={{borderBottom:"1px solid rgba(255,255,255,0.03)"}}>
-                <th style={{width:30,padding:"7px 4px"}}></th>
-                {[
-                  {k:"safety",l:"SAFE",w:72},{k:"potential",l:"x2 POT",w:72},
-                  {k:"name",l:"TOKEN",w:110},{k:null,l:"CHART",w:130},
-                  {k:"price",l:"PRICE",w:85},{k:"change_24h",l:"24H",w:58},
-                  {k:"market_cap",l:"MCAP",w:68},{k:"volume_24h",l:"VOL",w:68},
-                  {k:"liquidity",l:"LIQ",w:60},{k:null,l:"FLAGS",w:90},{k:null,l:"",w:30},
-                ].map((c,i)=>(
-                  <th key={i} onClick={()=>c.k&&handleSort(c.k)} style={{textAlign:"left",padding:"7px 5px",fontSize:8,fontWeight:700,letterSpacing:"1px",color:sortBy===c.k?"#00e5ff":"#222",cursor:c.k?"pointer":"default",whiteSpace:"nowrap",userSelect:"none",width:c.w}}>
-                    {c.l} {c.k&&<SortIcon col={c.k}/>}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map(token=>{
-                const isW=watchlist.includes(token.address);
-                return(
-                  <tr key={token.address||token.id} onClick={()=>setSelected(token)} style={{borderBottom:"1px solid rgba(255,255,255,0.012)",cursor:"pointer",transition:"background 0.1s",background:isW?"rgba(255,171,0,0.02)":"transparent"}}
-                    onMouseEnter={e=>e.currentTarget.style.background=isW?"rgba(255,171,0,0.04)":"rgba(255,255,255,0.012)"}
-                    onMouseLeave={e=>e.currentTarget.style.background=isW?"rgba(255,171,0,0.02)":"transparent"}>
-                    <td style={{padding:"7px 4px",textAlign:"center"}}><span onClick={e=>toggleWatch(token.address,e)} style={{cursor:"pointer",fontSize:13,color:isW?"#ffab00":"#1a1a1a",transition:"color 0.15s"}}>★</span></td>
-                    <td style={{padding:"7px 5px"}}><ScoreBar score={token.safety}/></td>
-                    <td style={{padding:"7px 5px"}}><ScoreBar score={token.potential} color={getPotColor(token.potential)}/></td>
-                    <td style={{padding:"7px 5px"}}><div style={{fontWeight:700,color:"#e8eaed",fontSize:11}}>{token.symbol}</div><div style={{fontSize:8,color:"#222"}}>{token.address?.slice(0,8)}...</div></td>
-                    <td style={{padding:"7px 5px"}}><MiniChart data={token.price_history} staircase={token.staircase_detected}/></td>
-                    <td style={{padding:"7px 5px",color:"#aaa",fontFamily:"var(--f)"}}>${fmtP(token.price)}</td>
-                    <td style={{padding:"7px 5px",fontWeight:700,fontFamily:"var(--f)",color:token.change_24h>=0?"#00e676":"#ff1744",fontSize:10}}>{token.change_24h>=0?"+":""}{token.change_24h?.toFixed(1)||0}%</td>
-                    <td style={{padding:"7px 5px",color:"#666",fontFamily:"var(--f)"}}>${fmt(token.market_cap)}</td>
-                    <td style={{padding:"7px 5px",color:"#666",fontFamily:"var(--f)"}}>${fmt(token.volume_24h)}</td>
-                    <td style={{padding:"7px 5px",color:token.liquidity<5000?"#ff6d00":"#666",fontFamily:"var(--f)"}}>${fmt(token.liquidity)}</td>
-                    <td style={{padding:"7px 5px"}}>
-                      <div style={{display:"flex",gap:2,flexWrap:"wrap"}}>
-                        {token.staircase_detected&&<span style={{padding:"1px 4px",borderRadius:2,fontSize:7,fontWeight:800,background:"rgba(255,23,68,0.1)",color:"#ff1744",border:"1px solid rgba(255,23,68,0.2)"}}>STAIRS</span>}
-                        {token.rugcheck?.mintEnabled&&<span style={{padding:"1px 4px",borderRadius:2,fontSize:7,fontWeight:700,background:"rgba(255,23,68,0.08)",color:"#ff1744",border:"1px solid rgba(255,23,68,0.15)"}}>MINT</span>}
-                        {token.rugcheck?.freezeEnabled&&<span style={{padding:"1px 4px",borderRadius:2,fontSize:7,fontWeight:700,background:"rgba(255,109,0,0.08)",color:"#ff6d00",border:"1px solid rgba(255,109,0,0.15)"}}>FREEZE</span>}
-                        {token.safety>=75&&!token.staircase_detected&&<span style={{padding:"1px 4px",borderRadius:2,fontSize:7,fontWeight:700,background:"rgba(0,230,118,0.06)",color:"#00e676",border:"1px solid rgba(0,230,118,0.12)"}}>OK</span>}
-                      </div>
-                    </td>
-                    <td style={{padding:"7px 4px",textAlign:"center"}}><span onClick={e=>copyAddr(token.address,e)} title="Copy address" style={{cursor:"pointer",fontSize:11,color:copied===token.address?"#00e676":"#222",transition:"color 0.15s"}}>{copied===token.address?"✓":"⊕"}</span></td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {!loading&&filtered.length===0&&(
-        <div style={{textAlign:"center",padding:"40px 20px",color:"#1a1a1a",fontSize:10,letterSpacing:"1px"}}>
-          {tab==="watchlist"?"NO TOKENS IN WATCHLIST":tokens.length===0?"WAITING FOR FIRST SCAN...":"NO TOKENS MATCH FILTERS"}
-        </div>
-      )}
-
-      {/* FOOTER */}
-      <div style={{marginTop:14,padding:"8px 0",borderTop:"1px solid rgba(255,255,255,0.02)",display:"flex",justifyContent:"space-between",fontSize:8,color:"#1a1a1a",letterSpacing:"1px"}}>
-        <span>LIVE DATA . SOLANA NETWORK</span>
-        <span>{tokens.length} TOKENS TRACKED</span>
-      </div>
-
-      {/* MODALS */}
+        {loading&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:80}}><div style={{width:28,height:28,border:"3px solid #e2e8f0",borderTopColor:"#2563eb",borderRadius:"50%",animation:"spin 1s linear infinite",marginBottom:14}}/><div style={{fontSize:13,color:"#94a3b8"}}>Scanning Solana...</div></div>}
+        {!loading&&<div style={{background:"#fff",borderRadius:12,border:"1px solid #e2e8f0",overflow:"hidden"}}><div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><thead><tr style={{borderBottom:"1px solid #e2e8f0",background:"#f8fafc"}}><th style={{width:34,padding:"10px 6px"}}></th><SortTh col="safety" label="Safe" w={80}/><SortTh col="potential" label="x2" w={80}/><th style={{textAlign:"left",padding:"10px 8px",fontSize:10,fontWeight:600,color:"#94a3b8",width:120,textTransform:"uppercase",letterSpacing:0.5}}>Token</th><th style={{width:115,padding:"10px 8px"}}>Chart</th><SortTh col="price" label="Price" w={85}/><SortTh col="change_24h" label="24H" w={60}/><SortTh col="market_cap" label="MCap" w={70}/><SortTh col="volume_24h" label="Vol" w={70}/><SortTh col="liquidity" label="Liq" w={60}/><th style={{width:90,padding:"10px 8px"}}>Flags</th><th style={{width:30}}></th></tr></thead><tbody>
+        {filtered.map(tk=>{const isW=watchlist.includes(tk.address);return(<tr key={tk.address||tk.id} onClick={()=>setSelected(tk)} style={{borderBottom:"1px solid #f1f5f9",cursor:"pointer",background:isW?"#fffbeb":"#fff"}} onMouseEnter={e=>e.currentTarget.style.background=isW?"#fef3c7":"#f8fafc"} onMouseLeave={e=>e.currentTarget.style.background=isW?"#fffbeb":"#fff"}>
+          <td style={{padding:"8px 6px",textAlign:"center"}}><span onClick={e=>toggleWatch(tk.address,e)} style={{cursor:"pointer",color:isW?"#d97706":"#e2e8f0"}}>{isW?"★":"☆"}</span></td>
+          <td style={{padding:"8px"}}><ScoreBadge score={tk.safety} type="safety"/></td>
+          <td style={{padding:"8px"}}><ScoreBadge score={tk.potential} type="potential"/></td>
+          <td style={{padding:"8px"}}><div style={{fontWeight:600,color:"#1e293b",fontSize:12}}>{tk.symbol}</div><div style={{fontSize:9,color:"#94a3b8"}}>{tk.address?.slice(0,8)}...</div></td>
+          <td style={{padding:"8px"}}><MiniChart data={tk.price_history} bad={tk.staircase_detected}/></td>
+          <td style={{padding:"8px",color:"#475569"}}>${fmtP(tk.price)}</td>
+          <td style={{padding:"8px",fontWeight:600,color:tk.change_24h>=0?"#16a34a":"#dc2626"}}>{tk.change_24h>=0?"+":""}{(tk.change_24h||0).toFixed(1)}%</td>
+          <td style={{padding:"8px",color:"#64748b"}}>${fmt(tk.market_cap)}</td>
+          <td style={{padding:"8px",color:"#64748b"}}>${fmt(tk.volume_24h)}</td>
+          <td style={{padding:"8px",color:tk.liquidity<5000?"#ea580c":"#64748b"}}>${fmt(tk.liquidity)}</td>
+          <td style={{padding:"8px"}}><div style={{display:"flex",gap:3,flexWrap:"wrap"}}>{tk.staircase_detected&&<FlagBadge label="Stairs" type="danger"/>}{tk.rugcheck?.mintEnabled&&<FlagBadge label="Mint" type="danger"/>}{tk.rugcheck?.freezeEnabled&&<FlagBadge label="Freeze" type="warn"/>}{tk.safety>=75&&!tk.staircase_detected&&<FlagBadge label="Clean" type="ok"/>}</div></td>
+          <td style={{padding:"8px 6px",textAlign:"center"}}><span onClick={e=>copyAddr(tk.address,e)} style={{cursor:"pointer",fontSize:12,color:copied===tk.address?"#16a34a":"#cbd5e1"}}>{copied===tk.address?"✓":"⊕"}</span></td>
+        </tr>);})}
+        </tbody></table></div>{filtered.length===0&&<div style={{textAlign:"center",padding:50,color:"#94a3b8",fontSize:13}}>{tab==="watchlist"?"No tokens in watchlist":tokens.length===0?"Waiting for first scan...":"No tokens match filters"}</div>}</div>}
+      </main>
       {selected&&<TokenDetail token={selected} onClose={()=>setSelected(null)}/>}
       {showAlerts&&<AlertsPanel alerts={alerts} onClose={()=>setShowAlerts(false)}/>}
     </div>
