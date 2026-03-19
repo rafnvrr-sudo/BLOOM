@@ -221,7 +221,7 @@ function calcReturnProba(token) {
   if (token.staircase_detected) rawScore = Math.max(rawScore - 30, 0);
   if (token.rugcheck && !token.rugcheck.lpBurned && !token.rugcheck.lpLocked) rawScore = Math.max(rawScore - 10, 0);
   if (token.sell_tax > 15) rawScore = Math.max(rawScore - 40, 0);
-  else if (token.sell_tax > 5) rawScore = Math.max(rawScore - 15, 0);
+  else if (token.sell_tax > 8) rawScore = Math.max(rawScore - 12, 0);
   if (token.honeypot_detected) rawScore = 0;
 
   rawScore = Math.min(rawScore, 100);
@@ -247,7 +247,7 @@ function calcReturnProba(token) {
   else expectedGain = 15;
 
   if (token.change_24h < -30) expectedGain = Math.round(expectedGain * 0.3);
-  if (token.sell_tax > 5) expectedGain = Math.round(expectedGain * 0.5);
+  if (token.sell_tax > 8) expectedGain = Math.round(expectedGain * 0.5);
   if (token.staircase_detected) expectedGain = Math.round(expectedGain * 0.2);
 
   let horizon;
