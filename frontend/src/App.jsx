@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
-import { getTokens, getAlerts, getStats, getHealth, pingBackend, analyzeToken } from "./api.js";
+import { getTokens, getAlerts, getStats, getHealth, pingBackend, analyzeToken, getPaperPortfolio, paperBuy, paperSell, paperReset } from "./api.js";
 
 function getScoreColor(s){return s>=75?"#16a34a":s>=50?"#d97706":s>=25?"#ea580c":"#dc2626";}
 function getScoreBg(s){return s>=75?"#dcfce7":s>=50?"#fef3c7":s>=25?"#ffedd5":"#fee2e2";}
@@ -57,7 +57,8 @@ function TokenDetail({token:initialToken,onClose,onRefresh}){
 
         {/* Banners */}
         {ep>=50&&<InfoBox bg="#f5f3ff" border="#c4b5fd"><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:20}}>🚀</span><div><div style={{fontSize:13,fontWeight:700,color:"#7c3aed"}}>EARLY PUMP: {ep}/100</div><div style={{fontSize:11,color:"#6d28d9"}}>{(token.early_pump_signals||[]).join(" | ")}</div></div></div></InfoBox>}
-        {sm&&sm.score>=30&&<InfoBox bg="#eff6ff" border="#93c5fd"><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:20}}>🐋</span><div><div style={{fontSize:13,fontWeight:700,color:"#1d4ed8"}}>SMART MONEY: {sm.score}/100</div><div style={{fontSize:11,color:"#2563eb"}}>{(sm.signals||[]).join(" | ")}</div>{sm.knownBuyers&&sm.knownBuyers.length>0&&<div style={{marginTop:4,display:"flex",gap:4,flexWrap:"wrap"}}>{sm.knownBuyers.map((b,i)=><span key={i} style={{fontSize:9,padding:"2px 6px",borderRadius:6,background:"#dbeafe",color:"#1e40af",fontWeight:600}}>{b.wallet} ({b.label})</span>)}</div>}</div></div></InfoBox>}
+        {sm&&sm.score>=30&&<InfoBox bg={sm.trustLevel==="suspect"?"#fef2f2":"#eff6ff"} border={sm.trustLevel==="suspect"?"#fecaca":"#93c5fd"}><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:20}}>{sm.trustLevel==="suspect"?"⚠️":"🐋"}</span><div><div style={{fontSize:13,fontWeight:700,color:sm.trustLevel==="suspect"?"#dc2626":"#1d4ed8"}}>SMART MONEY: {sm.score}/100 {sm.trustLevel==="suspect"?"(SUSPECT)":sm.trustLevel==="high"?"(FIABLE)":""}</div><div style={{fontSize:11,color:sm.trustLevel==="suspect"?"#991b1b":"#2563eb"}}>{(sm.signals||[]).join(" | ")}</div>{sm.toxicBuyers&&sm.toxicBuyers.length>0&&<div style={{marginTop:4,display:"flex",gap:4,flexWrap:"wrap"}}>{sm.toxicBuyers.map((b,i)=><span key={i} style={{fontSize:9,padding:"2px 6px",borderRadius:6,background:"#fee2e2",color:"#dc2626",fontWeight:600}}>⚠ {b.wallet} ({b.label}, rep:{b.reputation})</span>)}</div>}{sm.knownBuyers&&sm.knownBuyers.length>0&&<div style={{marginTop:4,display:"flex",gap:4,flexWrap:"wrap"}}>{sm.knownBuyers.filter(b=>(b.reputation||0)>=0).map((b,i)=><span key={i} style={{fontSize:9,padding:"2px 6px",borderRadius:6,background:"#dbeafe",color:"#1e40af",fontWeight:600}}>{b.wallet} ({b.label}, W:{b.wins})</span>)}</div>}</div></div></InfoBox>}
+        {sm&&sm.trustLevel==="suspect"&&sm.score<30&&<InfoBox bg="#fef2f2" border="#fecaca"><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:20}}>⚠️</span><div><div style={{fontSize:13,fontWeight:700,color:"#dc2626"}}>WALLETS TOXIQUES DETECTES</div><div style={{fontSize:11,color:"#991b1b"}}>{(sm.signals||[]).join(" | ")}</div></div></div></InfoBox>}
         {trend&&<InfoBox bg="#fffbeb" border="#fde68a"><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:20}}>🔥</span><div><div style={{fontSize:13,fontWeight:700,color:"#b45309"}}>TREND: {trend.term}</div><div style={{fontSize:11,color:"#92400e"}}>Score {trend.score}/100 | {trend.freshness}min{trend.competition?" | "+trend.competition+" concurrents":""}</div></div></div></InfoBox>}
 
         {/* Links */}
@@ -136,6 +137,11 @@ function TokenDetail({token:initialToken,onClose,onRefresh}){
 
         {/* Security */}
         <div style={{marginBottom:16}}><SectionTitle>Security audit</SectionTitle><div style={{display:"flex",flexDirection:"column",gap:4}}>{Object.entries(checks).map(([k,c],i)=>(<div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 12px",borderRadius:8,background:c.pass?"#f0fdf4":"#fef2f2",border:"1px solid "+(c.pass?"#bbf7d0":"#fecaca")}}><span style={{fontSize:11,color:c.pass?"#166534":"#991b1b",fontWeight:500}}>{k.replace(/_/g," ").toUpperCase()}</span><Badge ok={c.pass} label={String(c.value)}/></div>))}</div></div>
+        {/* Paper Trading */}
+        <div style={{background:"#f8fafc",borderRadius:12,padding:14,marginBottom:16,border:"1px solid #e2e8f0"}}>
+          <SectionTitle>Paper Trade</SectionTitle>
+          <PaperTradeWidget address={token.address} symbol={token.symbol} price={token.price}/>
+        </div>
         <button onClick={onClose} style={{width:"100%",padding:11,borderRadius:10,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#64748b",cursor:"pointer",fontSize:13,fontWeight:600}}>Close</button>
       </div>
     </div>
@@ -153,6 +159,7 @@ function Sidebar({collapsed,setCollapsed,tab,setTab,stats}){
     {key:"danger",label:"Danger Zone",d:"M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"},
     {key:"trending",label:"Trending",d:"M17.657 18.657A8 8 0 016.343 7.343S7 9 9 10c0-2 .5-5 2.986-7C14 5 16.09 5.777 17.656 7.343A7.975 7.975 0 0120 13a7.975 7.975 0 01-2.343 5.657z"},
     {key:"watchlist",label:"Watchlist",d:"M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"},
+    {key:"portfolio",label:"Portfolio",d:"M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"},
   ];
   return(
     <aside style={{width:collapsed?60:230,background:"#fff",borderRight:"1px solid #e2e8f0",height:"100vh",display:"flex",flexDirection:"column",transition:"width 0.2s",flexShrink:0,overflow:"hidden"}}>
@@ -164,23 +171,155 @@ function Sidebar({collapsed,setCollapsed,tab,setTab,stats}){
 
 function HealthPanel({health,onClose}){const sc={ok:"#16a34a",degraded:"#d97706",down:"#dc2626",unknown:"#94a3b8"};const sb={ok:"#dcfce7",degraded:"#fef3c7",down:"#fee2e2",unknown:"#f3f4f6"};return(<div style={{position:"fixed",inset:0,zIndex:1000,background:"rgba(15,23,42,0.5)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={onClose}><div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:16,width:"100%",maxWidth:500,padding:24,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 25px 50px rgba(0,0,0,0.15)"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}><div style={{fontSize:18,fontWeight:700,color:"#1e293b"}}>System Status</div>{health&&<span style={{fontSize:12,fontWeight:600,padding:"4px 12px",borderRadius:12,background:health.status==="healthy"?"#dcfce7":"#fef3c7",color:health.status==="healthy"?"#16a34a":"#d97706"}}>{health.status?.toUpperCase()}</span>}</div>{!health&&<div style={{textAlign:"center",padding:40,color:"#94a3b8"}}>Loading...</div>}{health&&<><div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:18}}>{[{l:"UPTIME",v:health.uptime?Math.floor(health.uptime/60)+"m":"?"},{l:"SCANS",v:health.scans||0},{l:"TOKENS",v:health.tokens||0}].map((s,i)=><div key={i} style={{background:"#f8fafc",borderRadius:10,padding:"10px 14px",border:"1px solid #e2e8f0"}}><div style={{fontSize:10,color:"#94a3b8"}}>{s.l}</div><div style={{fontSize:15,fontWeight:700}}>{s.v}</div></div>)}</div><div style={{display:"flex",flexDirection:"column",gap:8}}>{health.services&&Object.entries(health.services).map(([name,svc])=>{const st=svc.status||"unknown";return(<div key={name} style={{background:"#f8fafc",borderRadius:10,padding:14,border:"1px solid #e2e8f0"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}><div style={{display:"flex",alignItems:"center",gap:8}}><div style={{width:9,height:9,borderRadius:"50%",background:sc[st]}}/><span style={{fontSize:13,fontWeight:600,textTransform:"capitalize"}}>{name}</span></div><span style={{fontSize:11,fontWeight:600,padding:"2px 10px",borderRadius:12,background:sb[st],color:sc[st]}}>{st.toUpperCase()}</span></div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4,fontSize:11,color:"#64748b"}}><span>Latency: <b style={{color:svc.latency>2000?"#dc2626":"#1e293b"}}>{svc.latency||0}ms</b></span><span>Errors: <b style={{color:svc.errorCount>0?"#dc2626":"#1e293b"}}>{svc.errorCount||0}</b></span></div></div>);})}</div></>}<button onClick={onClose} style={{width:"100%",padding:11,borderRadius:10,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#64748b",cursor:"pointer",fontSize:13,fontWeight:600,marginTop:14}}>Close</button></div></div>);}
 
+function PaperTradeWidget({address,symbol,price}){
+  const[buyAmt,setBuyAmt]=useState("50");
+  const[sellPct,setSellPct]=useState("100");
+  const[result,setResult]=useState(null);
+  const[loading,setLoading]=useState(false);
+
+  const handleBuy=async()=>{
+    setLoading(true);setResult(null);
+    try{const r=await paperBuy(address,parseFloat(buyAmt));setResult({type:"buy",data:r});}
+    catch(e){setResult({type:"error",msg:e.message});}
+    setLoading(false);
+  };
+  const handleSell=async()=>{
+    setLoading(true);setResult(null);
+    try{const r=await paperSell(address,parseInt(sellPct));setResult({type:"sell",data:r});}
+    catch(e){setResult({type:"error",msg:e.message});}
+    setLoading(false);
+  };
+
+  return(<div>
+    <div style={{display:"flex",gap:8,marginBottom:8}}>
+      <div style={{flex:1}}>
+        <div style={{fontSize:10,color:"#64748b",marginBottom:3}}>Acheter ($)</div>
+        <div style={{display:"flex",gap:4}}>
+          <input type="number" value={buyAmt} onChange={e=>setBuyAmt(e.target.value)} style={{width:70,padding:"6px 8px",borderRadius:6,border:"1px solid #e2e8f0",fontSize:12}}/>
+          {[25,50,100].map(v=><button key={v} onClick={()=>setBuyAmt(String(v))} style={{padding:"4px 8px",borderRadius:6,border:"1px solid #e2e8f0",background:buyAmt===String(v)?"#eff6ff":"#fff",color:"#475569",cursor:"pointer",fontSize:11}}>${v}</button>)}
+          <button onClick={handleBuy} disabled={loading} style={{padding:"6px 14px",borderRadius:8,border:"none",background:"#16a34a",color:"#fff",cursor:loading?"wait":"pointer",fontSize:12,fontWeight:600}}>BUY</button>
+        </div>
+      </div>
+      <div style={{flex:1}}>
+        <div style={{fontSize:10,color:"#64748b",marginBottom:3}}>Vendre (%)</div>
+        <div style={{display:"flex",gap:4}}>
+          {[25,50,75,100].map(v=><button key={v} onClick={()=>setSellPct(String(v))} style={{padding:"4px 8px",borderRadius:6,border:"1px solid #e2e8f0",background:sellPct===String(v)?"#fef2f2":"#fff",color:"#475569",cursor:"pointer",fontSize:11}}>{v}%</button>)}
+          <button onClick={handleSell} disabled={loading} style={{padding:"6px 14px",borderRadius:8,border:"none",background:"#dc2626",color:"#fff",cursor:loading?"wait":"pointer",fontSize:12,fontWeight:600}}>SELL</button>
+        </div>
+      </div>
+    </div>
+    {result&&result.type==="error"&&<div style={{padding:"6px 10px",borderRadius:6,background:"#fee2e2",color:"#dc2626",fontSize:11}}>{result.msg}</div>}
+    {result&&result.type==="buy"&&<div style={{padding:"8px 10px",borderRadius:6,background:"#dcfce7",fontSize:11,color:"#166534"}}>Achat {result.data.symbol}: {result.data.tokens_received?.toFixed(0)} tokens a ${price?.toFixed(8)} | Frais: ${result.data.fees?.total_fees_usd?.toFixed(2)} ({result.data.fees?.total_fee_pct?.toFixed(1)}%) | Solde: ${result.data.new_balance?.toFixed(2)}</div>}
+    {result&&result.type==="sell"&&<div style={{padding:"8px 10px",borderRadius:6,background:result.data.pnl_usd>=0?"#dcfce7":"#fee2e2",fontSize:11,color:result.data.pnl_usd>=0?"#166534":"#991b1b"}}>Vente {result.data.symbol} ({result.data.pct}%): ${result.data.net_usd?.toFixed(2)} net | PnL: {result.data.pnl_usd>=0?"+":""}${result.data.pnl_usd?.toFixed(2)} ({result.data.pnl_pct?.toFixed(1)}%) | Frais: ${result.data.fees?.total_fees_usd?.toFixed(2)} | Solde: ${result.data.new_balance?.toFixed(2)}</div>}
+  </div>);
+}
+
+function PortfolioPanel({onClose}){
+  const[data,setData]=useState(null);const[loading,setLoading]=useState(true);
+  const load=async()=>{try{const d=await getPaperPortfolio();setData(d);}catch{}setLoading(false);};
+  useEffect(()=>{load();const iv=setInterval(load,15000);return()=>clearInterval(iv);},[]);
+  const handleReset=async()=>{if(confirm("Reset le portefeuille paper?")){await paperReset(1000);load();}};
+
+  if(loading)return(<div style={{position:"fixed",inset:0,zIndex:1000,background:"rgba(15,23,42,0.5)",display:"flex",alignItems:"center",justifyContent:"center"}}><div style={{background:"#fff",borderRadius:16,padding:40,color:"#94a3b8"}}>Chargement...</div></div>);
+
+  const d=data||{};
+  const eq=d.total_equity||0;const ret=d.total_return_pct||0;
+
+  return(
+    <div style={{position:"fixed",inset:0,zIndex:1000,background:"rgba(15,23,42,0.5)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:16,width:"100%",maxWidth:650,padding:24,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 25px 50px rgba(0,0,0,0.15)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <div style={{fontSize:18,fontWeight:700,color:"#1e293b"}}>Paper Portfolio</div>
+          <div style={{display:"flex",gap:8}}>
+            <span style={{fontSize:13,fontWeight:700,color:ret>=0?"#16a34a":"#dc2626"}}>{ret>=0?"+":""}{ret.toFixed(1)}%</span>
+            <button onClick={handleReset} style={{padding:"4px 12px",borderRadius:6,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#64748b",cursor:"pointer",fontSize:11}}>Reset</button>
+          </div>
+        </div>
+
+        {/* Stats */}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8,marginBottom:16}}>
+          {[
+            {l:"Balance",v:"$"+d.balance_usd?.toFixed(2),c:"#1e293b"},
+            {l:"Positions",v:"$"+(d.portfolio_value||0).toFixed(2),c:"#2563eb"},
+            {l:"Equity",v:"$"+eq.toFixed(2),c:ret>=0?"#16a34a":"#dc2626"},
+            {l:"Frais payes",v:"$"+(d.total_fees_paid||0).toFixed(2),c:"#d97706"},
+          ].map((s,i)=><div key={i} style={{background:"#f8fafc",borderRadius:10,padding:"10px 12px",border:"1px solid #e2e8f0"}}><div style={{fontSize:9,color:"#94a3b8",fontWeight:600,textTransform:"uppercase"}}>{s.l}</div><div style={{fontSize:15,fontWeight:700,color:s.c}}>{s.v}</div></div>)}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8,marginBottom:16}}>
+          {[
+            {l:"Trades",v:d.trades_total||0},
+            {l:"Win Rate",v:(d.win_rate||0)+"%",c:d.win_rate>=50?"#16a34a":"#dc2626"},
+            {l:"Avg Win",v:"$"+(d.avg_win||0).toFixed(2),c:"#16a34a"},
+            {l:"Avg Loss",v:"$"+Math.abs(d.avg_loss||0).toFixed(2),c:"#dc2626"},
+          ].map((s,i)=><div key={i} style={{background:"#f8fafc",borderRadius:10,padding:"10px 12px",border:"1px solid #e2e8f0"}}><div style={{fontSize:9,color:"#94a3b8",fontWeight:600,textTransform:"uppercase"}}>{s.l}</div><div style={{fontSize:15,fontWeight:700,color:s.c||"#1e293b"}}>{s.v}</div></div>)}
+        </div>
+
+        {/* Open positions */}
+        {d.positions&&d.positions.length>0&&<>
+          <div style={{fontSize:12,fontWeight:600,color:"#64748b",textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Positions ouvertes ({d.positions.length})</div>
+          <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:16}}>
+            {d.positions.map(p=>(
+              <div key={p.id} style={{padding:"10px 14px",borderRadius:10,background:p.pnl_usd>=0?"#f0fdf4":"#fef2f2",border:"1px solid "+(p.pnl_usd>=0?"#bbf7d0":"#fecaca")}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                  <div><span style={{fontWeight:700,fontSize:13,color:"#1e293b"}}>{p.symbol}</span> <span style={{fontSize:10,color:"#94a3b8"}}>{p.id}</span></div>
+                  <span style={{fontWeight:700,fontSize:13,color:p.pnl_usd>=0?"#16a34a":"#dc2626"}}>{p.pnl_usd>=0?"+":""}${p.pnl_usd?.toFixed(2)} ({p.pnl_pct?.toFixed(1)}%)</span>
+                </div>
+                <div style={{display:"flex",gap:12,fontSize:11,color:"#64748b"}}>
+                  <span>Entry: ${p.entry_price<0.0001?p.entry_price?.toExponential(2):p.entry_price?.toFixed(6)}</span>
+                  <span>Now: ${p.current_price<0.0001?p.current_price?.toExponential(2):p.current_price?.toFixed(6)}</span>
+                  <span>Valeur: ${p.current_value?.toFixed(2)}</span>
+                  <span>ATH DD: -{p.drawdown_from_ath?.toFixed(0)}%</span>
+                  <span>Safety: {p.safety}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>}
+
+        {/* Trade history */}
+        {d.history&&d.history.length>0&&<>
+          <div style={{fontSize:12,fontWeight:600,color:"#64748b",textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Historique ({d.history.length})</div>
+          <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:16}}>
+            {d.history.map((h,i)=>(
+              <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",borderRadius:8,background:"#f8fafc",border:"1px solid #e2e8f0"}}>
+                <div><span style={{fontWeight:600,fontSize:12,color:"#1e293b"}}>{h.symbol}</span> <span style={{fontSize:10,color:"#94a3b8"}}>{Math.round(h.hold_duration_min)}min</span></div>
+                <div style={{display:"flex",gap:12,fontSize:11}}>
+                  <span style={{color:"#64748b"}}>Frais: ${h.total_fees?.toFixed(2)}</span>
+                  <span style={{fontWeight:700,color:h.pnl_usd>=0?"#16a34a":"#dc2626"}}>{h.pnl_usd>=0?"+":""}${h.pnl_usd?.toFixed(2)} ({h.pnl_pct?.toFixed(1)}%)</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>}
+
+        <div style={{fontSize:11,color:"#94a3b8",textAlign:"center",marginBottom:10}}>SOL: ${d.sol_price?.toFixed(2)} | Frais: network {(0.000005*2*d.sol_price||0).toFixed(4)}$ + LP 0.25% + slippage variable + sell tax</div>
+        <button onClick={onClose} style={{width:"100%",padding:11,borderRadius:10,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#64748b",cursor:"pointer",fontSize:13,fontWeight:600}}>Close</button>
+      </div>
+    </div>
+  );
+}
+
 export default function App(){
   const[tokens,setTokens]=useState([]);const[stats,setStatsData]=useState(null);const[alerts,setAlerts]=useState([]);const[loading,setLoading]=useState(true);const[error,setError]=useState(null);
   const[sortBy,setSortBy]=useState("safety");const[sortDir,setSortDir]=useState("desc");const[minScore,setMinScore]=useState(0);const[selected,setSelected]=useState(null);const[showAlerts,setShowAlerts]=useState(false);
   const[tab,setTab]=useState("all");const[search,setSearch]=useState("");const[watchlist,setWatchlist]=useState([]);const[copied,setCopied]=useState(null);const[lastUpdate,setLastUpdate]=useState(null);const[collapsed,setCollapsed]=useState(false);
   const[health,setHealth]=useState(null);const[showHealth,setShowHealth]=useState(false);const[backendAwake,setBackendAwake]=useState(false);
+  const[showPortfolio,setShowPortfolio]=useState(false);
 
   useEffect(()=>{let a=0;const w=async()=>{const ok=await pingBackend();if(ok){setBackendAwake(true);return;}a++;if(a<10)setTimeout(w,3000);};w();},[]);
   const fetchData=useCallback(async()=>{try{const[t,s,al,h]=await Promise.all([getTokens({sort:sortBy,dir:sortDir}),getStats(),getAlerts(),getHealth().catch(()=>null)]);setTokens(t.tokens||[]);setStatsData(s);setAlerts(al.alerts||[]);if(h)setHealth(h);setLastUpdate(new Date());setError(null);setLoading(false);setBackendAwake(true);}catch(e){setError(e.message);setLoading(false);}},[sortBy,sortDir]);
   useEffect(()=>{if(backendAwake){fetchData();const iv=setInterval(fetchData,15000);return()=>clearInterval(iv);}},[fetchData,backendAwake]);
 
-  const filtered=useMemo(()=>{let l=[...tokens];if(search){const q=search.toLowerCase();l=l.filter(t=>t.name?.toLowerCase().includes(q)||t.symbol?.toLowerCase().includes(q)||t.address?.toLowerCase().includes(q));}if(minScore>0)l=l.filter(t=>t.safety>=minScore);if(tab==="safe")l=l.filter(t=>t.safety>=75);if(tab==="potential")l=l.filter(t=>(t.return_proba?.probability>=40||t.potential>=50)&&t.safety>=50);if(tab==="earlyPump")l=l.filter(t=>t.early_pump_score>=40&&t.safety>=30);if(tab==="danger")l=l.filter(t=>t.safety<25||t.staircase_detected||t.honeypot_detected||t.sell_tax>15);if(tab==="trending")l=l.filter(t=>t.trend_match);if(tab==="watchlist")l=l.filter(t=>watchlist.includes(t.address));return l;},[tokens,search,minScore,tab,watchlist]);
+  const filtered=useMemo(()=>{let l=[...tokens];if(search){const q=search.toLowerCase();l=l.filter(t=>t.name?.toLowerCase().includes(q)||t.symbol?.toLowerCase().includes(q)||t.address?.toLowerCase().includes(q));}if(minScore>0)l=l.filter(t=>t.safety>=minScore);const safeTh=stats?.safeThreshold||75;if(tab==="safe")l=l.filter(t=>t.safety>=safeTh);if(tab==="potential")l=l.filter(t=>(t.return_proba?.probability>=40||t.potential>=50)&&t.safety>=50);if(tab==="earlyPump")l=l.filter(t=>t.early_pump_score>=40&&t.safety>=30);if(tab==="danger")l=l.filter(t=>t.safety<25||t.staircase_detected||t.honeypot_detected||t.sell_tax>15);if(tab==="trending")l=l.filter(t=>t.trend_match);if(tab==="watchlist")l=l.filter(t=>watchlist.includes(t.address));return l;},[tokens,search,minScore,tab,watchlist,stats]);
 
   const handleSort=(c)=>{if(sortBy===c)setSortDir(d=>d==="desc"?"asc":"desc");else{setSortBy(c);setSortDir("desc");}};
   const toggleWatch=useCallback((a,e)=>{e.stopPropagation();setWatchlist(w=>w.includes(a)?w.filter(x=>x!==a):[...w,a]);},[]);
   const copyAddr=useCallback((a,e)=>{e.stopPropagation();navigator.clipboard.writeText(a).catch(()=>{});setCopied(a);setTimeout(()=>setCopied(null),1500);},[]);
   const SortTh=({col,label,w})=>(<th onClick={()=>handleSort(col)} style={{textAlign:"left",padding:"10px 8px",fontSize:10,fontWeight:600,color:sortBy===col?"#2563eb":"#94a3b8",cursor:"pointer",whiteSpace:"nowrap",userSelect:"none",width:w,textTransform:"uppercase",letterSpacing:0.5}}>{label} {sortBy===col&&(sortDir==="desc"?"↓":"↑")}</th>);
-  const tabLabels={all:"All Tokens",safe:"Safe Tokens",potential:"Retour +",earlyPump:"Early Pump",danger:"Danger Zone",trending:"Trending",watchlist:"Watchlist"};
+  const tabLabels={all:"All Tokens",safe:"Safe Tokens",potential:"Retour +",earlyPump:"Early Pump",danger:"Danger Zone",trending:"Trending",watchlist:"Watchlist",portfolio:"Portfolio"};
+
+  // Open portfolio panel when portfolio tab is clicked
+  useEffect(()=>{if(tab==="portfolio"){setShowPortfolio(true);setTab("all");}},[tab]);
 
   return(
     <div style={{display:"flex",height:"100vh",overflow:"hidden",background:"#f1f5f9",fontFamily:"'DM Sans',sans-serif"}}>
@@ -191,7 +330,7 @@ export default function App(){
           <div><h1 style={{fontSize:22,fontWeight:700,color:"#1e293b",margin:0}}>{tabLabels[tab]}</h1><div style={{display:"flex",alignItems:"center",gap:8,marginTop:3}}><p style={{fontSize:13,color:"#94a3b8",margin:0}}>{!backendAwake?"Waking up backend...":error?"Error: "+error:lastUpdate?"Last scan: "+lastUpdate.toLocaleTimeString("fr-FR"):"Connecting..."}</p>{health&&health.services&&<div style={{display:"flex",gap:4,alignItems:"center"}}>{Object.entries(health.services).map(([n,s])=><div key={n} title={n+": "+s.status} style={{width:7,height:7,borderRadius:"50%",background:s.status==="ok"?"#16a34a":s.status==="degraded"?"#d97706":"#dc2626"}}/>)}</div>}</div></div>
           <div style={{display:"flex",gap:8}}><button onClick={()=>setShowHealth(true)} style={{padding:"7px 14px",borderRadius:10,border:"1px solid #e2e8f0",background:"#fff",color:"#64748b",cursor:"pointer",fontSize:12,fontWeight:500}}>Status</button><button onClick={()=>setShowAlerts(true)} style={{padding:"7px 14px",borderRadius:10,border:"1px solid #e2e8f0",background:"#fff",color:"#64748b",cursor:"pointer",fontSize:12,fontWeight:500,position:"relative"}}>Alerts{alerts.length>0&&<span style={{position:"absolute",top:-4,right:-4,width:18,height:18,borderRadius:9,background:"#dc2626",color:"#fff",fontSize:10,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>{alerts.length}</span>}</button><button onClick={fetchData} style={{padding:"7px 14px",borderRadius:10,border:"1px solid #e2e8f0",background:"#fff",color:"#64748b",cursor:"pointer",fontSize:12,fontWeight:500}}>Refresh</button></div>
         </div>
-        {stats&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(130px, 1fr))",gap:10,marginBottom:18}}><StatCard label="Scanned" value={stats.total}/><StatCard label="Avg Safety" value={stats.avgScore} color={getScoreColor(stats.avgScore)}/><StatCard label="Rug Rate" value={stats.rugRate+"%"} color={stats.rugRate>30?"#dc2626":"#d97706"}/><StatCard label="Early Pumps" value={stats.earlyPumps||0} color="#7c3aed"/><StatCard label="Smart Money" value={stats.smartMoney||0} color="#1d4ed8"/><StatCard label="Trending" value={stats.trending||0} color="#b45309"/></div>}
+        {stats&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(130px, 1fr))",gap:10,marginBottom:18}}><StatCard label="Scanned" value={stats.total}/><StatCard label="Avg Safety" value={stats.avgScore} color={getScoreColor(stats.avgScore)}/><StatCard label={"Safe (>"+( stats.safeThreshold||75)+")"} value={stats.safe} color="#16a34a"/><StatCard label="Rug Rate" value={stats.rugRate+"%"} color={stats.rugRate>30?"#dc2626":"#d97706"}/><StatCard label="Early Pumps" value={stats.earlyPumps||0} color="#7c3aed"/><StatCard label="Trending" value={stats.trending||0} color="#b45309"/></div>}
         <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}><div style={{position:"relative",flex:1,maxWidth:300}}><svg width="16" height="16" fill="none" stroke="#94a3b8" viewBox="0 0 24 24" style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)"}}><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg><input type="text" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search..." style={{width:"100%",padding:"8px 12px 8px 38px",borderRadius:10,border:"1px solid #e2e8f0",background:"#fff",fontSize:13,color:"#1e293b",outline:"none"}}/></div><div style={{display:"flex",gap:4}}><span style={{fontSize:11,color:"#94a3b8",alignSelf:"center",marginRight:4}}>Min</span>{[0,25,50,75].map(s=>(<button key={s} onClick={()=>setMinScore(s)} style={{padding:"5px 12px",borderRadius:8,border:"1px solid "+(minScore===s?"#2563eb":"#e2e8f0"),background:minScore===s?"#eff6ff":"#fff",color:minScore===s?"#2563eb":"#64748b",cursor:"pointer",fontSize:11,fontWeight:500}}>{s===0?"All":s+"+"}</button>))}</div></div>
         {loading&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:80}}><div style={{width:28,height:28,border:"3px solid #e2e8f0",borderTopColor:"#2563eb",borderRadius:"50%",animation:"spin 1s linear infinite",marginBottom:14}}/><div style={{fontSize:13,color:"#94a3b8"}}>{!backendAwake?"Waking up Render (30-50s)...":"Scanning Solana..."}</div></div>}
         {!loading&&<div style={{background:"#fff",borderRadius:12,border:"1px solid #e2e8f0",overflow:"hidden"}}><div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><thead><tr style={{borderBottom:"1px solid #e2e8f0",background:"#f8fafc"}}><th style={{width:34,padding:"10px 6px"}}></th><SortTh col="safety" label="Safe" w={75}/><SortTh col="return_proba" label="Retour" w={115}/><th style={{textAlign:"left",padding:"10px 8px",fontSize:10,fontWeight:600,color:"#94a3b8",width:110,textTransform:"uppercase",letterSpacing:0.5}}>Token</th><th style={{width:100,padding:"10px 8px"}}>Chart</th><SortTh col="market_cap" label="MCap" w={65}/><SortTh col="change_24h" label="24H" w={55}/><SortTh col="liquidity" label="Liq" w={55}/><th style={{width:150,padding:"10px 8px"}}>Flags</th><th style={{width:30}}></th></tr></thead><tbody>
@@ -204,7 +343,7 @@ export default function App(){
           <td style={{padding:"8px",color:"#64748b"}}>${fmt(tk.market_cap)}</td>
           <td style={{padding:"8px",fontWeight:600,color:tk.change_24h>=0?"#16a34a":"#dc2626"}}>{tk.change_24h>=0?"+":""}{(tk.change_24h||0).toFixed(1)}%</td>
           <td style={{padding:"8px",color:tk.liquidity<5000?"#ea580c":"#64748b"}}>${fmt(tk.liquidity)}</td>
-          <td style={{padding:"8px"}}><div style={{display:"flex",gap:3,flexWrap:"wrap"}}>{tk.early_pump_score>=50&&<FlagBadge label={"🚀 "+tk.early_pump_score} type="pump"/>}{tk.smart_money?.score>=30&&<FlagBadge label={"🐋 "+tk.smart_money.score} type="whale"/>}{tk.trend_match&&<FlagBadge label={"🔥 "+tk.trend_match.term} type="trend"/>}{tk.ai_analysis&&<FlagBadge label={tk.ai_analysis.verdict==="ACHETER"?"🟢 IA":"🔴 IA"} type={tk.ai_analysis.verdict==="ACHETER"?"ok":"danger"}/>}{tk.honeypot_detected&&<FlagBadge label="Honeypot" type="danger"/>}{tk.sell_tax>15&&<FlagBadge label={"Tax "+tk.sell_tax.toFixed(0)+"%"} type="danger"/>}{tk.staircase_detected&&<FlagBadge label="Stairs" type="danger"/>}{tk.social?.score===0&&tk.age_hours>1&&<FlagBadge label="No social" type="warn"/>}{tk.safety>=70&&!tk.staircase_detected&&!tk.honeypot_detected&&!(tk.sell_tax>8)&&!tk.trend_match&&!tk.ai_analysis&&tk.early_pump_score<50&&<FlagBadge label="Clean" type="ok"/>}</div></td>
+          <td style={{padding:"8px"}}><div style={{display:"flex",gap:3,flexWrap:"wrap"}}>{tk.early_pump_score>=50&&<FlagBadge label={"🚀 "+tk.early_pump_score} type="pump"/>}{tk.smart_money?.score>=30&&<FlagBadge label={tk.smart_money.trustLevel==="suspect"?"⚠ Toxic":"🐋 "+tk.smart_money.score} type={tk.smart_money.trustLevel==="suspect"?"danger":"whale"}/>}{tk.trend_match&&<FlagBadge label={"🔥 "+tk.trend_match.term} type="trend"/>}{tk.ai_analysis&&<FlagBadge label={tk.ai_analysis.verdict==="ACHETER"?"🟢 IA":"🔴 IA"} type={tk.ai_analysis.verdict==="ACHETER"?"ok":"danger"}/>}{tk.honeypot_detected&&<FlagBadge label="Honeypot" type="danger"/>}{tk.sell_tax>15&&<FlagBadge label={"Tax "+tk.sell_tax.toFixed(0)+"%"} type="danger"/>}{tk.staircase_detected&&<FlagBadge label="Stairs" type="danger"/>}{tk.social?.score===0&&tk.age_hours>1&&<FlagBadge label="No social" type="warn"/>}{tk.safety>=70&&!tk.staircase_detected&&!tk.honeypot_detected&&!(tk.sell_tax>8)&&!tk.trend_match&&!tk.ai_analysis&&tk.early_pump_score<50&&<FlagBadge label="Clean" type="ok"/>}</div></td>
           <td style={{padding:"8px 6px",textAlign:"center"}}><span onClick={e=>copyAddr(tk.address,e)} style={{cursor:"pointer",fontSize:12,color:copied===tk.address?"#16a34a":"#cbd5e1"}}>{copied===tk.address?"✓":"⊕"}</span></td>
         </tr>);})}
         </tbody></table></div>{filtered.length===0&&<div style={{textAlign:"center",padding:50,color:"#94a3b8",fontSize:13}}>{tab==="watchlist"?"No tokens in watchlist":tab==="earlyPump"?"No early pump signals":tokens.length===0?"Waiting for first scan...":"No tokens match filters"}</div>}</div>}
@@ -212,6 +351,7 @@ export default function App(){
       {selected&&<TokenDetail token={selected} onClose={()=>setSelected(null)} onRefresh={fetchData}/>}
       {showAlerts&&<AlertsPanel alerts={alerts} onClose={()=>setShowAlerts(false)}/>}
       {showHealth&&<HealthPanel health={health} onClose={()=>setShowHealth(false)}/>}
+      {showPortfolio&&<PortfolioPanel onClose={()=>setShowPortfolio(false)}/>}
     </div>
   );
 }

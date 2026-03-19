@@ -40,6 +40,203 @@ const smartMoneyStore = {
 // ─── FEATURE 4: EARLY PUMP TRACKING ───
 const volumeHistory = new Map(); // tokenAddress -> [{ vol5m, timestamp }]
 
+// ─── BACKTESTING LOGGER ───
+const backtestLog = []; // { address, symbol, timestamp, safety, potential, probability, price, mcap, earlyPump, smartMoney }
+const BACKTEST_MAX = 500;
+
+function logForBacktest(token) {
+  backtestLog.push({
+    address: token.address,
+    symbol: token.symbol,
+    timestamp: Date.now(),
+    safety: token.safety,
+    potential: token.potential,
+    probability: token.return_proba?.probability || 0,
+    expectedGain: token.return_proba?.expectedGain || 0,
+    horizon: token.return_proba?.horizon || "?",
+    price: token.price,
+    mcap: token.market_cap,
+    liq: token.liquidity,
+    earlyPump: token.early_pump_score || 0,
+    smartMoney: token.smart_money?.score || 0,
+    trendMatch: token.trend_match?.term || null,
+    socialScore: token.social_score || 0,
+    aiVerdict: token.ai_analysis?.verdict || null,
+    aiConfirmation: token.ai_analysis?.score_confirmation || null,
+    change_1h: token.change_1h,
+    change_24h: token.change_24h,
+    // These will be filled later by the backtest checker
+    price_4h_later: null,
+    price_24h_later: null,
+    result_4h: null, // "win" | "loss" | "pending"
+    result_24h: null,
+  });
+  if (backtestLog.length > BACKTEST_MAX) backtestLog.splice(0, backtestLog.length - BACKTEST_MAX);
+}
+
+// Check backtest results: compare logged prices with current prices
+function checkBacktestResults() {
+  const now = Date.now();
+  for (const entry of backtestLog) {
+    const ageMs = now - entry.timestamp;
+    const token = tokenStore.find(t => t.address === entry.address);
+    if (!token) continue;
+    if (!entry.price_4h_later && ageMs >= 4 * 60 * 60 * 1000) {
+      entry.price_4h_later = token.price;
+      const change = ((token.price - entry.price) / Math.max(entry.price, 0.0000001)) * 100;
+      entry.result_4h = change > 10 ? "win" : change < -20 ? "loss" : "flat";
+    }
+    if (!entry.price_24h_later && ageMs >= 24 * 60 * 60 * 1000) {
+      entry.price_24h_later = token.price;
+      const change = ((token.price - entry.price) / Math.max(entry.price, 0.0000001)) * 100;
+      entry.result_24h = change > 20 ? "win" : change < -30 ? "loss" : "flat";
+    }
+  }
+}
+
+// ─── PAPER TRADING MODULE ───
+// Realistic simulation: USD -> SOL -> Token with fees, slippage, and live price updates
+
+const SOL_PRICE_CACHE = { price: 150, lastFetch: 0 }; // SOL/USD cache
+
+async function fetchSolPrice() {
+  if (Date.now() - SOL_PRICE_CACHE.lastFetch < 60000) return SOL_PRICE_CACHE.price;
+  try {
+    const res = await fetchWithTimeout("https://api.dexscreener.com/latest/dex/search?q=SOL%20USDC", 5000);
+    if (res.ok) {
+      const data = await res.json();
+      const solPair = (data.pairs || []).find(p => p.chainId === "solana" && p.baseToken?.symbol === "SOL" && p.quoteToken?.symbol === "USDC");
+      if (solPair) { SOL_PRICE_CACHE.price = parseFloat(solPair.priceUsd || 150); SOL_PRICE_CACHE.lastFetch = Date.now(); }
+    }
+  } catch {}
+  return SOL_PRICE_CACHE.price;
+}
+
+// Fee structure (realistic Solana memecoin trading)
+const FEES = {
+  SOL_TX_FEE: 0.000005,       // SOL network fee per tx (~0.000005 SOL)
+  PHANTOM_PRIORITY: 0.0001,   // Phantom priority fee
+  RAYDIUM_FEE_PCT: 0.25,      // Raydium/PumpSwap LP fee 0.25%
+  DEFAULT_BUY_SLIPPAGE: 2.0,  // Default buy slippage % if not measured
+  DEFAULT_SELL_SLIPPAGE: 3.0,  // Default sell slippage % (sells usually worse)
+};
+
+const paperPortfolio = {
+  balance_usd: 1000,           // Starting paper balance
+  initial_balance: 1000,
+  positions: [],               // Active positions
+  history: [],                 // Closed trades
+  trade_count: 0,
+};
+
+function calcBuyFees(amountUsd, token, solPrice) {
+  const solAmount = amountUsd / solPrice;
+  const solAfterTxFee = solAmount - FEES.SOL_TX_FEE - FEES.PHANTOM_PRIORITY;
+  const solAfterLpFee = solAfterTxFee * (1 - FEES.RAYDIUM_FEE_PCT / 100);
+  const buySlippage = (token.buy_slippage != null && token.buy_slippage > 0) ? token.buy_slippage : FEES.DEFAULT_BUY_SLIPPAGE;
+  const solAfterSlippage = solAfterLpFee * (1 - buySlippage / 100);
+  const usdAfterFees = solAfterSlippage * solPrice;
+  const tokensReceived = usdAfterFees / Math.max(token.price, 0.0000000001);
+  const totalFeesUsd = amountUsd - usdAfterFees;
+  const totalFeePct = (totalFeesUsd / amountUsd) * 100;
+
+  return {
+    sol_spent: solAmount,
+    sol_after_fees: solAfterSlippage,
+    usd_after_fees: usdAfterFees,
+    tokens_received: tokensReceived,
+    total_fees_usd: totalFeesUsd,
+    total_fee_pct: totalFeePct,
+    breakdown: {
+      network_fee: (FEES.SOL_TX_FEE + FEES.PHANTOM_PRIORITY) * solPrice,
+      lp_fee: (solAfterTxFee - solAfterLpFee) * solPrice,
+      slippage: (solAfterLpFee - solAfterSlippage) * solPrice,
+      slippage_pct: buySlippage,
+    },
+  };
+}
+
+function calcSellFees(tokensToSell, token, solPrice) {
+  const grossUsd = tokensToSell * token.price;
+  const sellSlippage = (token.sell_slippage != null && token.sell_slippage > 0) ? token.sell_slippage : FEES.DEFAULT_SELL_SLIPPAGE;
+  const sellTax = (token.sell_tax != null && token.sell_tax > 0) ? token.sell_tax : 0;
+  const afterSlippage = grossUsd * (1 - sellSlippage / 100);
+  const afterTax = afterSlippage * (1 - sellTax / 100);
+  const afterLpFee = afterTax * (1 - FEES.RAYDIUM_FEE_PCT / 100);
+  const solReceived = afterLpFee / solPrice;
+  const solAfterTxFee = solReceived - FEES.SOL_TX_FEE - FEES.PHANTOM_PRIORITY;
+  const netUsd = solAfterTxFee * solPrice;
+  const totalFeesUsd = grossUsd - netUsd;
+  const totalFeePct = grossUsd > 0 ? (totalFeesUsd / grossUsd) * 100 : 0;
+
+  return {
+    gross_usd: grossUsd,
+    net_usd: Math.max(netUsd, 0),
+    sol_received: Math.max(solAfterTxFee, 0),
+    total_fees_usd: totalFeesUsd,
+    total_fee_pct: totalFeePct,
+    breakdown: {
+      slippage: grossUsd - afterSlippage,
+      slippage_pct: sellSlippage,
+      sell_tax: afterSlippage - afterTax,
+      sell_tax_pct: sellTax,
+      lp_fee: afterTax - afterLpFee,
+      network_fee: (FEES.SOL_TX_FEE + FEES.PHANTOM_PRIORITY) * solPrice,
+    },
+  };
+}
+
+// Update all open positions with current prices (called each scan)
+function updatePaperPositions() {
+  for (const pos of paperPortfolio.positions) {
+    const token = tokenStore.find(t => t.address === pos.address);
+    if (token) {
+      pos.current_price = token.price;
+      pos.current_value = pos.tokens * token.price;
+      pos.pnl_usd = pos.current_value - pos.cost_basis;
+      pos.pnl_pct = pos.cost_basis > 0 ? ((pos.current_value - pos.cost_basis) / pos.cost_basis) * 100 : 0;
+      pos.safety = token.safety;
+      pos.last_update = Date.now();
+      // Track ATH for this position
+      if (pos.current_value > (pos.ath_value || 0)) {
+        pos.ath_value = pos.current_value;
+        pos.ath_price = token.price;
+      }
+      // Drawdown from ATH
+      pos.drawdown_from_ath = pos.ath_value > 0 ? ((pos.ath_value - pos.current_value) / pos.ath_value) * 100 : 0;
+    }
+  }
+}
+
+function calcPortfolioStats() {
+  const positions = paperPortfolio.positions;
+  const totalValue = positions.reduce((s, p) => s + (p.current_value || 0), 0);
+  const totalCost = positions.reduce((s, p) => s + (p.cost_basis || 0), 0);
+  const totalPnl = totalValue - totalCost;
+  const closedPnl = paperPortfolio.history.reduce((s, h) => s + (h.pnl_usd || 0), 0);
+  const totalFeesPaid = paperPortfolio.history.reduce((s, h) => s + (h.total_fees || 0), 0)
+    + positions.reduce((s, p) => s + (p.buy_fees || 0), 0);
+  const wins = paperPortfolio.history.filter(h => h.pnl_usd > 0).length;
+  const losses = paperPortfolio.history.filter(h => h.pnl_usd <= 0).length;
+
+  return {
+    balance_usd: paperPortfolio.balance_usd,
+    portfolio_value: totalValue,
+    total_equity: paperPortfolio.balance_usd + totalValue,
+    initial_balance: paperPortfolio.initial_balance,
+    total_return_pct: ((paperPortfolio.balance_usd + totalValue - paperPortfolio.initial_balance) / paperPortfolio.initial_balance) * 100,
+    open_positions: positions.length,
+    open_pnl: totalPnl,
+    closed_pnl: closedPnl,
+    total_fees_paid: totalFeesPaid,
+    trades_total: paperPortfolio.trade_count,
+    wins, losses,
+    win_rate: wins + losses > 0 ? Math.round(wins / (wins + losses) * 100) : 0,
+    avg_win: wins > 0 ? paperPortfolio.history.filter(h => h.pnl_usd > 0).reduce((s, h) => s + h.pnl_usd, 0) / wins : 0,
+    avg_loss: losses > 0 ? paperPortfolio.history.filter(h => h.pnl_usd <= 0).reduce((s, h) => s + h.pnl_usd, 0) / losses : 0,
+  };
+}
+
 // ─── SERVICE HEALTH ───
 const serviceHealth = {
   dexscreener: { status: "unknown", lastSuccess: null, lastError: null, errorCount: 0, latency: 0, pairsReturned: 0 },
@@ -177,6 +374,14 @@ function calcSafety(token) {
     else { checks.social = { pass: false, value: "Score " + token.social_score }; }
   }
 
+  // Holders bonus (when data available)
+  if (token.holders > 0) {
+    checks.holders = { pass: token.holders >= 100, value: token.holders.toLocaleString() };
+    if (token.holders >= 500) score += 5;
+    else if (token.holders >= 100) score += 3;
+    else if (token.holders < 20 && token.age_hours > 1) penalties += 3;
+  }
+
   const finalScore = Math.max(Math.min(score - penalties, 100), 0);
   return { score: finalScore, checks };
 }
@@ -202,6 +407,9 @@ function calcReturnProba(token) {
 
   if (token.market_cap < 50000) rawScore += 15; else if (token.market_cap < 200000) rawScore += 12;
   else if (token.market_cap < 500000) rawScore += 8; else if (token.market_cap < 1000000) rawScore += 4;
+  // MCap ceiling: big caps have less x2 potential
+  if (token.market_cap > 10000000) rawScore = Math.max(rawScore - 10, 0);
+  else if (token.market_cap > 5000000) rawScore = Math.max(rawScore - 5, 0);
 
   // 1h momentum: moderate gains are better signals than extreme pumps
   if (token.change_1h > 10 && token.change_1h <= 50) rawScore += 15;
@@ -250,10 +458,21 @@ function calcReturnProba(token) {
   if (token.sell_tax > 8) expectedGain = Math.round(expectedGain * 0.5);
   if (token.staircase_detected) expectedGain = Math.round(expectedGain * 0.2);
 
+  // Dynamic horizon based on volatility + age + volume pace
   let horizon;
-  if (token.age_hours < 6) horizon = "4h";
-  else if (token.age_hours < 24) horizon = "24h";
-  else horizon = "1-3j";
+  const absVol1h = Math.abs(token.change_1h || 0);
+  const absVol5m = Math.abs(token.change_5m || 0);
+  const volatility = absVol1h + absVol5m * 3; // 5m weighted more (recent action)
+  const volPace = token.volume_1h / Math.max(token.market_cap, 1); // how fast money flows
+
+  if (token.age_hours < 1 && volatility > 50) horizon = "30min-1h";
+  else if (token.age_hours < 2 && volatility > 30) horizon = "1-2h";
+  else if (token.age_hours < 6 && volPace > 0.5) horizon = "2-4h";
+  else if (token.age_hours < 6) horizon = "4-6h";
+  else if (token.age_hours < 24 && volatility > 20) horizon = "6-12h";
+  else if (token.age_hours < 24) horizon = "12-24h";
+  else if (volatility > 15) horizon = "1-2j";
+  else horizon = "2-5j";
 
   const factors = {
     vol_mcap: vmRatio.toFixed(2) + "x",
@@ -451,65 +670,111 @@ async function fetchRecentBuyers(tokenMint) {
   }
 }
 
-// Build smart money profile by cross-referencing buyers with known profitable wallets
+// Build smart money profile with REPUTATION system
+// Wallets are tracked with wins AND losses. A wallet present on rugged tokens gets flagged.
 function calcSmartMoneyScore(token, recentBuyers) {
   let score = 0;
   const signals = [];
   const knownBuyers = [];
+  const toxicBuyers = [];
 
   if (!recentBuyers || recentBuyers.length === 0) {
-    return { score: 0, signals: ["No buyer data"], knownBuyers: [] };
+    return { score: 0, signals: ["No buyer data"], knownBuyers: [], toxicBuyers: [], trustLevel: "unknown" };
   }
 
   // Check each buyer against known wallets
   for (const buyer of recentBuyers) {
     const known = smartMoneyStore.knownWallets.get(buyer.wallet);
     if (known) {
-      knownBuyers.push({
+      const walletInfo = {
         wallet: buyer.wallet.slice(0, 4) + "..." + buyer.wallet.slice(-4),
         label: known.label,
         pnl: known.pnl,
         wins: known.wins,
+        losses: known.losses || 0,
+        trades: known.trades,
+        reputation: known.reputation || 0,
         amount: buyer.amount,
-      });
+      };
+
+      // Reputation check: positive rep = legit, negative = toxic
+      if (known.reputation < -2 || known.label === "rug_associated" || known.label === "dump_wallet") {
+        toxicBuyers.push(walletInfo);
+      } else if (known.reputation >= 2 || known.wins >= 3) {
+        knownBuyers.push(walletInfo);
+      } else {
+        // Neutral wallet, count as basic buyer
+        knownBuyers.push(walletInfo);
+      }
     }
   }
 
-  // Score based on number and quality of known wallets
-  if (knownBuyers.length >= 3) { score += 40; signals.push(knownBuyers.length + " smart wallets detected"); }
-  else if (knownBuyers.length >= 2) { score += 30; signals.push(knownBuyers.length + " smart wallets detected"); }
-  else if (knownBuyers.length >= 1) { score += 20; signals.push("1 smart wallet detected"); }
+  // TOXIC WALLETS = BIG RED FLAG
+  if (toxicBuyers.length >= 2) {
+    score -= 30;
+    signals.push("⚠ " + toxicBuyers.length + " wallets toxiques detectes");
+  } else if (toxicBuyers.length === 1) {
+    score -= 15;
+    signals.push("⚠ 1 wallet toxique detecte");
+  }
 
-  // Bonus for high-PNL wallets
-  const totalPnl = knownBuyers.reduce((sum, b) => sum + (b.pnl || 0), 0);
-  if (totalPnl > 100000) { score += 25; signals.push("Total PNL > $100K"); }
-  else if (totalPnl > 10000) { score += 15; signals.push("Total PNL > $10K"); }
+  // Legit known wallets (positive reputation only)
+  const legitBuyers = knownBuyers.filter(b => (b.reputation || 0) >= 0 && b.wins > b.losses);
+  if (legitBuyers.length >= 3) { score += 35; signals.push(legitBuyers.length + " wallets confirmes"); }
+  else if (legitBuyers.length >= 2) { score += 25; signals.push(legitBuyers.length + " wallets confirmes"); }
+  else if (legitBuyers.length >= 1) { score += 15; signals.push("1 wallet confirme"); }
 
-  // Large number of unique recent buyers = organic interest
+  // Win rate of known wallets matters
+  const totalWins = legitBuyers.reduce((s, b) => s + (b.wins || 0), 0);
+  const totalLosses = legitBuyers.reduce((s, b) => s + (b.losses || 0), 0);
+  if (totalWins + totalLosses > 0) {
+    const winRate = totalWins / (totalWins + totalLosses);
+    if (winRate >= 0.7) { score += 15; signals.push("Win rate " + Math.round(winRate * 100) + "%"); }
+    else if (winRate >= 0.5) { score += 8; signals.push("Win rate " + Math.round(winRate * 100) + "%"); }
+    else { score -= 5; signals.push("Win rate faible " + Math.round(winRate * 100) + "%"); }
+  }
+
+  // Unique organic buyers
   const uniqueBuyers = new Set(recentBuyers.map(b => b.wallet)).size;
-  if (uniqueBuyers >= 15) { score += 15; signals.push(uniqueBuyers + " unique buyers"); }
-  else if (uniqueBuyers >= 8) { score += 10; signals.push(uniqueBuyers + " unique buyers"); }
-  else if (uniqueBuyers >= 3) { score += 5; signals.push(uniqueBuyers + " unique buyers"); }
+  if (uniqueBuyers >= 15) { score += 15; signals.push(uniqueBuyers + " buyers uniques"); }
+  else if (uniqueBuyers >= 8) { score += 10; signals.push(uniqueBuyers + " buyers uniques"); }
+  else if (uniqueBuyers >= 3) { score += 5; }
 
-  // Recent activity (buys in last 5 min)
+  // Concentration check: if top 3 wallets hold > 80% of buys, suspicious
+  const buyerAmounts = recentBuyers.reduce((map, b) => { map.set(b.wallet, (map.get(b.wallet) || 0) + (b.amount || 0)); return map; }, new Map());
+  const sortedAmounts = [...buyerAmounts.values()].sort((a, b) => b - a);
+  const totalAmount = sortedAmounts.reduce((s, v) => s + v, 0);
+  if (sortedAmounts.length >= 3 && totalAmount > 0) {
+    const top3Pct = (sortedAmounts[0] + sortedAmounts[1] + sortedAmounts[2]) / totalAmount;
+    if (top3Pct > 0.8) { score -= 10; signals.push("Top 3 = " + Math.round(top3Pct * 100) + "% (concentre)"); }
+  }
+
+  // Recent activity
   const recentCount = recentBuyers.filter(b => Date.now() - b.timestamp < 5 * 60 * 1000).length;
-  if (recentCount >= 5) { score += 10; signals.push(recentCount + " buys in 5min"); }
+  if (recentCount >= 5) { score += 10; signals.push(recentCount + " buys en 5min"); }
 
-  return { score: Math.min(score, 100), signals, knownBuyers };
+  // Trust level
+  let trustLevel = "neutral";
+  if (toxicBuyers.length >= 2) trustLevel = "suspect";
+  else if (toxicBuyers.length === 1 && legitBuyers.length < 2) trustLevel = "suspect";
+  else if (legitBuyers.length >= 3) trustLevel = "high";
+  else if (legitBuyers.length >= 1) trustLevel = "moderate";
+
+  return { score: Math.max(Math.min(score, 100), 0), signals, knownBuyers, toxicBuyers, trustLevel };
 }
 
-// Periodically discover top performing wallets from recent tokens
+// Periodically discover top performing wallets AND flag rug wallets
 async function refreshSmartMoneyWallets() {
   if (!HELIUS_KEY) return;
   console.log("[Smart Money] Refreshing wallet database...");
 
-  // Get top performing tokens from our store (safe + high potential)
-  const topTokens = tokenStore
+  // WINNERS: tokens that went up significantly
+  const winners = tokenStore
     .filter(t => t.safety >= 60 && t.change_24h > 50)
     .sort((a, b) => b.change_24h - a.change_24h)
     .slice(0, 5);
 
-  for (const token of topTokens) {
+  for (const token of winners) {
     try {
       const buyers = await fetchRecentBuyers(token.address);
       for (const buyer of buyers) {
@@ -517,45 +782,71 @@ async function refreshSmartMoneyWallets() {
         if (existing) {
           existing.trades++;
           existing.wins++;
+          existing.reputation = (existing.reputation || 0) + 1;
           existing.lastSeen = Date.now();
         } else {
           smartMoneyStore.knownWallets.set(buyer.wallet, {
-            pnl: 0, // Will be enriched over time
-            wins: 1,
-            trades: 1,
-            label: "early_buyer",
-            lastSeen: Date.now(),
+            pnl: 0, wins: 1, losses: 0, trades: 1, label: "early_buyer",
+            reputation: 1, lastSeen: Date.now(), rugsAssociated: 0,
           });
         }
       }
       await new Promise(r => setTimeout(r, 500));
-    } catch (err) {
-      console.error("Smart money refresh error:", err.message);
-    }
+    } catch (err) { console.error("Smart money refresh error:", err.message); }
   }
 
-  // Promote wallets that appear on multiple winning tokens
+  // LOSERS/RUGS: tokens that crashed hard (safety < 20, or honeypot, or -80% 24h)
+  const rugs = tokenStore
+    .filter(t => t.honeypot_detected || t.safety < 15 || t.change_24h < -80 || t.staircase_detected)
+    .slice(0, 5);
+
+  for (const token of rugs) {
+    try {
+      const buyers = await fetchRecentBuyers(token.address);
+      for (const buyer of buyers) {
+        const existing = smartMoneyStore.knownWallets.get(buyer.wallet);
+        if (existing) {
+          existing.losses = (existing.losses || 0) + 1;
+          existing.reputation = (existing.reputation || 0) - 2; // rugs penalize harder than wins reward
+          existing.rugsAssociated = (existing.rugsAssociated || 0) + 1;
+          if (existing.rugsAssociated >= 3) existing.label = "rug_associated";
+          else if (existing.reputation < -3) existing.label = "dump_wallet";
+        } else {
+          smartMoneyStore.knownWallets.set(buyer.wallet, {
+            pnl: 0, wins: 0, losses: 1, trades: 1, label: "early_buyer",
+            reputation: -2, lastSeen: Date.now(), rugsAssociated: 1,
+          });
+        }
+      }
+      await new Promise(r => setTimeout(r, 500));
+    } catch (err) { console.error("Smart money rug scan error:", err.message); }
+  }
+
+  // Update labels based on accumulated data
   for (const [wallet, data] of smartMoneyStore.knownWallets) {
-    if (data.wins >= 3) data.label = "consistent_winner";
-    if (data.wins >= 5) data.label = "whale_sniper";
-    // Clean old wallets
+    if (data.rugsAssociated >= 3) data.label = "rug_associated";
+    else if (data.reputation < -3) data.label = "dump_wallet";
+    else if (data.reputation >= 5 && data.wins >= 5) data.label = "whale_sniper";
+    else if (data.reputation >= 3 && data.wins >= 3) data.label = "consistent_winner";
+    else if (data.reputation >= 0) data.label = "early_buyer";
+
+    // Clean old wallets (> 7 days)
     if (Date.now() - data.lastSeen > 7 * 24 * 60 * 60 * 1000) {
       smartMoneyStore.knownWallets.delete(wallet);
     }
   }
 
-  // Keep max 5000 wallets
   if (smartMoneyStore.knownWallets.size > 5000) {
     const sorted = [...smartMoneyStore.knownWallets.entries()]
-      .sort((a, b) => b[1].wins - a[1].wins);
+      .sort((a, b) => Math.abs(b[1].reputation) - Math.abs(a[1].reputation));
     smartMoneyStore.knownWallets.clear();
-    for (const [k, v] of sorted.slice(0, 3000)) {
-      smartMoneyStore.knownWallets.set(k, v);
-    }
+    for (const [k, v] of sorted.slice(0, 3000)) smartMoneyStore.knownWallets.set(k, v);
   }
 
+  const totalWallets = smartMoneyStore.knownWallets.size;
+  const toxicCount = [...smartMoneyStore.knownWallets.values()].filter(w => w.reputation < -2).length;
   smartMoneyStore.lastRefresh = Date.now();
-  console.log(`[Smart Money] Tracking ${smartMoneyStore.knownWallets.size} wallets`);
+  console.log(`[Smart Money] ${totalWallets} wallets tracked (${toxicCount} toxic)`);
 }
 
 // ─── FEATURE 6: SOCIAL PRE-CHECK ───
@@ -1087,6 +1378,11 @@ async function scanOnce() {
 
     newTokens.push(token);
 
+    // Backtest: log scored tokens for later comparison
+    if (token.safety >= 40 || token.early_pump_score >= 40) {
+      logForBacktest(token);
+    }
+
     // Groq AI (async)
     if (GROQ_API_KEY && token.safety >= 60 && token.potential >= 40 && !token.ai_analysis) {
       analyzeWithGroq(token).then(a => { if (a) { token.ai_analysis = a; token.ai_analysis_at = Date.now(); const s = tokenStore.find(t => t.address === token.address); if (s) { s.ai_analysis = a; s.ai_analysis_at = Date.now(); } } }).catch(() => {});
@@ -1128,7 +1424,8 @@ async function scanOnce() {
   for (const token of newTokens) { const idx = tokenStore.findIndex(t => t.address === token.address); if (idx >= 0) tokenStore[idx] = token; else tokenStore.unshift(token); }
   if (tokenStore.length > 200) tokenStore = tokenStore.slice(0, 200);
   lastScan = Date.now(); scanCount++;
-  console.log(`Scan #${scanCount} complete. ${newTokens.length} tokens. Store: ${tokenStore.length}. SmartWallets: ${smartMoneyStore.knownWallets.size}`);
+  updatePaperPositions();
+  console.log(`Scan #${scanCount} complete. ${newTokens.length} tokens. Store: ${tokenStore.length}. SmartWallets: ${smartMoneyStore.knownWallets.size}. Paper: ${paperPortfolio.positions.length} pos`);
 }
 
 // ─── API ROUTES ───
@@ -1167,6 +1464,30 @@ app.post("/api/analyze/:address", async (req, res) => {
   }
 });
 app.get("/api/alerts", (req, res) => { res.json({ alerts: alertLog.slice(0, 50) }); });
+
+// Backtest results
+app.get("/api/backtest", (req, res) => {
+  checkBacktestResults();
+  const completed = backtestLog.filter(e => e.result_4h || e.result_24h);
+  const wins4h = completed.filter(e => e.result_4h === "win").length;
+  const losses4h = completed.filter(e => e.result_4h === "loss").length;
+  const wins24h = completed.filter(e => e.result_24h === "win").length;
+  const losses24h = completed.filter(e => e.result_24h === "loss").length;
+  const total4h = completed.filter(e => e.result_4h).length;
+  const total24h = completed.filter(e => e.result_24h).length;
+
+  res.json({
+    total_logged: backtestLog.length,
+    results_4h: { total: total4h, wins: wins4h, losses: losses4h, winRate: total4h > 0 ? Math.round(wins4h / total4h * 100) : 0 },
+    results_24h: { total: total24h, wins: wins24h, losses: losses24h, winRate: total24h > 0 ? Math.round(wins24h / total24h * 100) : 0 },
+    recent: backtestLog.slice(-20).reverse().map(e => ({
+      symbol: e.symbol, safety: e.safety, probability: e.probability, price: e.price,
+      mcap: e.mcap, logged: new Date(e.timestamp).toLocaleTimeString("fr-FR"),
+      result_4h: e.result_4h, result_24h: e.result_24h,
+      price_4h: e.price_4h_later, price_24h: e.price_24h_later,
+    })),
+  });
+});
 app.get("/api/stats", (req, res) => {
   const total = tokenStore.length;
   const safe = tokenStore.filter(t => t.safety >= 75).length;
@@ -1177,7 +1498,13 @@ app.get("/api/stats", (req, res) => {
   const smartMoney = tokenStore.filter(t => t.smart_money?.score >= 30).length;
   const avgScore = total > 0 ? Math.round(tokenStore.reduce((a, t) => a + t.safety, 0) / total) : 0;
   const best = tokenStore.reduce((b, t) => t.safety > (b?.safety || 0) ? t : b, null);
-  res.json({ total, safe, danger, stairs, trending, earlyPumps, smartMoney, avgScore, rugRate: total > 0 ? Math.round(danger / total * 100) : 0, bestSafety: best ? { symbol: best.symbol, score: best.safety } : null, lastScan, scanCount, activeTrends: trendStore.trends.size, trackedWallets: smartMoneyStore.knownWallets.size });
+  // Dynamic safe threshold: 80th percentile, clamped 50-85
+  let safeThreshold = 75;
+  if (total >= 10) {
+    const sorted = tokenStore.map(t => t.safety).sort((a, b) => a - b);
+    safeThreshold = Math.min(85, Math.max(50, sorted[Math.floor(sorted.length * 0.8)] || 75));
+  }
+  res.json({ total, safe, danger, stairs, trending, earlyPumps, smartMoney, avgScore, safeThreshold, rugRate: total > 0 ? Math.round(danger / total * 100) : 0, bestSafety: best ? { symbol: best.symbol, score: best.safety } : null, lastScan, scanCount, activeTrends: trendStore.trends.size, trackedWallets: smartMoneyStore.knownWallets.size });
 });
 app.get("/api/trends", (req, res) => {
   const trends = [];
@@ -1204,6 +1531,197 @@ app.get("/api/wallets", (req, res) => {
   wallets.sort((a, b) => b.wins - a.wins);
   res.json({ wallets: wallets.slice(0, 100), total: smartMoneyStore.knownWallets.size });
 });
+
+// ─── PAPER TRADING ROUTES ───
+
+// Get portfolio overview
+app.get("/api/paper", async (req, res) => {
+  updatePaperPositions();
+  const stats = calcPortfolioStats();
+  const solPrice = await fetchSolPrice();
+  res.json({
+    ...stats,
+    sol_price: solPrice,
+    positions: paperPortfolio.positions.map(p => ({
+      id: p.id, address: p.address, symbol: p.symbol, name: p.name,
+      tokens: p.tokens, entry_price: p.entry_price, current_price: p.current_price,
+      cost_basis: p.cost_basis, current_value: p.current_value,
+      pnl_usd: p.pnl_usd, pnl_pct: p.pnl_pct,
+      buy_fees: p.buy_fees, ath_value: p.ath_value, drawdown_from_ath: p.drawdown_from_ath,
+      safety: p.safety, opened_at: p.opened_at, last_update: p.last_update,
+      bloom_scores_at_entry: p.bloom_scores_at_entry,
+    })),
+    history: paperPortfolio.history.slice(-30).reverse(),
+  });
+});
+
+// BUY: open a paper position
+app.post("/api/paper/buy", async (req, res) => {
+  const { address, amount_usd } = req.body;
+  if (!address || !amount_usd) return res.status(400).json({ error: "address and amount_usd required" });
+  const usd = parseFloat(amount_usd);
+  if (usd <= 0 || usd > paperPortfolio.balance_usd) return res.status(400).json({ error: "Invalid amount. Balance: $" + paperPortfolio.balance_usd.toFixed(2) });
+
+  const token = tokenStore.find(t => t.address === address);
+  if (!token) return res.status(404).json({ error: "Token not in store" });
+  if (token.price <= 0) return res.status(400).json({ error: "Token has no price data" });
+
+  const solPrice = await fetchSolPrice();
+  const fees = calcBuyFees(usd, token, solPrice);
+
+  // Check if already have position on this token
+  const existing = paperPortfolio.positions.find(p => p.address === address);
+  if (existing) {
+    // Add to position (average up/down)
+    const newTokens = fees.tokens_received;
+    const newCost = fees.usd_after_fees;
+    existing.tokens += newTokens;
+    existing.cost_basis += newCost;
+    existing.entry_price = existing.cost_basis / existing.tokens;
+    existing.buy_fees += fees.total_fees_usd;
+    existing.current_price = token.price;
+    existing.current_value = existing.tokens * token.price;
+    existing.pnl_usd = existing.current_value - existing.cost_basis;
+    existing.pnl_pct = (existing.pnl_usd / existing.cost_basis) * 100;
+  } else {
+    const pos = {
+      id: "PT-" + (++paperPortfolio.trade_count),
+      address: token.address,
+      symbol: token.symbol,
+      name: token.name,
+      tokens: fees.tokens_received,
+      entry_price: token.price,
+      current_price: token.price,
+      cost_basis: fees.usd_after_fees,
+      current_value: fees.usd_after_fees,
+      buy_fees: fees.total_fees_usd,
+      pnl_usd: 0,
+      pnl_pct: 0,
+      ath_value: fees.usd_after_fees,
+      ath_price: token.price,
+      drawdown_from_ath: 0,
+      safety: token.safety,
+      opened_at: Date.now(),
+      last_update: Date.now(),
+      bloom_scores_at_entry: {
+        safety: token.safety,
+        potential: token.potential,
+        probability: token.return_proba?.probability || 0,
+        earlyPump: token.early_pump_score || 0,
+        smartMoney: token.smart_money?.score || 0,
+        aiVerdict: token.ai_analysis?.verdict || null,
+        aiConfirmation: token.ai_analysis?.score_confirmation || null,
+      },
+    };
+    paperPortfolio.positions.push(pos);
+  }
+
+  paperPortfolio.balance_usd -= usd;
+
+  res.json({
+    ok: true,
+    action: "BUY",
+    symbol: token.symbol,
+    amount_usd: usd,
+    tokens_received: fees.tokens_received,
+    price: token.price,
+    sol_price: solPrice,
+    fees: fees,
+    new_balance: paperPortfolio.balance_usd,
+  });
+});
+
+// SELL: close or partial close a paper position
+app.post("/api/paper/sell", async (req, res) => {
+  const { address, pct } = req.body; // pct: 1-100, how much of position to sell
+  if (!address) return res.status(400).json({ error: "address required" });
+  const sellPct = Math.min(100, Math.max(1, parseInt(pct) || 100));
+
+  const posIdx = paperPortfolio.positions.findIndex(p => p.address === address);
+  if (posIdx === -1) return res.status(404).json({ error: "No open position for this token" });
+
+  const pos = paperPortfolio.positions[posIdx];
+  const token = tokenStore.find(t => t.address === address);
+  if (token) { pos.current_price = token.price; pos.current_value = pos.tokens * token.price; }
+
+  const solPrice = await fetchSolPrice();
+  const tokensToSell = pos.tokens * (sellPct / 100);
+  const costBasisSold = pos.cost_basis * (sellPct / 100);
+  const fees = calcSellFees(tokensToSell, token || { price: pos.current_price, sell_slippage: null, sell_tax: null }, solPrice);
+
+  const pnlUsd = fees.net_usd - costBasisSold;
+  const pnlPct = costBasisSold > 0 ? (pnlUsd / costBasisSold) * 100 : 0;
+
+  // Record in history
+  paperPortfolio.history.push({
+    id: pos.id + (sellPct < 100 ? "-P" + sellPct : ""),
+    address: pos.address,
+    symbol: pos.symbol,
+    name: pos.name,
+    entry_price: pos.entry_price,
+    exit_price: pos.current_price,
+    tokens_sold: tokensToSell,
+    cost_basis: costBasisSold,
+    gross_usd: fees.gross_usd,
+    net_usd: fees.net_usd,
+    pnl_usd: pnlUsd,
+    pnl_pct: pnlPct,
+    total_fees: pos.buy_fees * (sellPct / 100) + fees.total_fees_usd,
+    sell_fees: fees.total_fees_usd,
+    sell_fee_breakdown: fees.breakdown,
+    hold_duration_min: Math.round((Date.now() - pos.opened_at) / 60000),
+    opened_at: pos.opened_at,
+    closed_at: Date.now(),
+    ath_value: pos.ath_value,
+    bloom_scores_at_entry: pos.bloom_scores_at_entry,
+    bloom_scores_at_exit: token ? {
+      safety: token.safety, potential: token.potential,
+      probability: token.return_proba?.probability || 0,
+    } : null,
+  });
+
+  paperPortfolio.balance_usd += fees.net_usd;
+
+  if (sellPct >= 100) {
+    paperPortfolio.positions.splice(posIdx, 1);
+  } else {
+    pos.tokens -= tokensToSell;
+    pos.cost_basis -= costBasisSold;
+    pos.buy_fees *= (1 - sellPct / 100);
+    pos.current_value = pos.tokens * pos.current_price;
+    pos.pnl_usd = pos.current_value - pos.cost_basis;
+    pos.pnl_pct = pos.cost_basis > 0 ? (pos.pnl_usd / pos.cost_basis) * 100 : 0;
+  }
+
+  res.json({
+    ok: true,
+    action: "SELL",
+    symbol: pos.symbol,
+    pct: sellPct,
+    tokens_sold: tokensToSell,
+    gross_usd: fees.gross_usd,
+    net_usd: fees.net_usd,
+    pnl_usd: pnlUsd,
+    pnl_pct: pnlPct,
+    fees: fees,
+    new_balance: paperPortfolio.balance_usd,
+    position_closed: sellPct >= 100,
+  });
+});
+
+// Reset paper portfolio
+app.post("/api/paper/reset", (req, res) => {
+  const startBalance = parseFloat(req.body.balance) || 1000;
+  paperPortfolio.balance_usd = startBalance;
+  paperPortfolio.initial_balance = startBalance;
+  paperPortfolio.positions = [];
+  paperPortfolio.history = [];
+  paperPortfolio.trade_count = 0;
+  res.json({ ok: true, balance: startBalance });
+});
+
+// ─── END PAPER TRADING ───
+
 app.get("/api/health", (req, res) => {
   const now = Date.now();
   const fmt2 = (name) => { const s = serviceHealth[name]; return { status: s.status, latency: s.latency, lastSuccess: s.lastSuccess ? new Date(s.lastSuccess).toISOString() : null, lastError: s.lastError ? new Date(s.lastError).toISOString() : null, errorCount: s.errorCount, sinceLastSuccess: s.lastSuccess ? Math.round((now - s.lastSuccess) / 1000) : null, ...Object.fromEntries(Object.entries(s).filter(([k]) => !["status", "latency", "lastSuccess", "lastError", "errorCount"].includes(k))) }; };
@@ -1224,6 +1742,8 @@ app.listen(PORT, () => {
   setInterval(refreshTrends, 15 * 60 * 1000);
   // Reset Jupiter backoff every 5 min
   setInterval(() => { if (jupiterConsecutiveErrors >= 10) { console.log("[Jupiter] Resetting backoff, retrying..."); jupiterConsecutiveErrors = 0; } }, 5 * 60 * 1000);
+  // Check backtest results every 10 min
+  setInterval(checkBacktestResults, 10 * 60 * 1000);
   // Refresh smart money wallets every 30 min
   if (HELIUS_KEY) { setTimeout(() => refreshSmartMoneyWallets(), 60000); setInterval(refreshSmartMoneyWallets, 30 * 60 * 1000); }
   // Validate Groq key at startup
